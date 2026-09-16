@@ -25,6 +25,7 @@ data class ServerEntity(
     val commandDelaySeconds: Int = 5,
     val onlineMode: Boolean = false,
     val username: String = "",
+    val viewDistance: Int = 12,
 )
 
 @Dao
@@ -45,7 +46,7 @@ interface ServerDao {
     suspend fun delete(server: ServerEntity)
 }
 
-@Database(entities = [ServerEntity::class], version = 3, exportSchema = false)
+@Database(entities = [ServerEntity::class], version = 4, exportSchema = false)
 abstract class AfkDatabase : RoomDatabase() {
     abstract fun serverDao(): ServerDao
 
@@ -65,13 +66,19 @@ abstract class AfkDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE servers ADD COLUMN viewDistance INTEGER NOT NULL DEFAULT 12")
+            }
+        }
+
         fun get(context: Context): AfkDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext,
                     AfkDatabase::class.java,
                     "afk.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build().also { instance = it }
             }
     }

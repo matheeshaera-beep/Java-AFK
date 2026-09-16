@@ -455,6 +455,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             commandDelaySeconds = draft.value.delayInt,
                             onlineMode = draft.value.onlineMode,
                             username = draft.value.username.trim(),
+                            viewDistance = draft.value.viewDistanceInt,
                         ),
                     )
                     showAdd = false
@@ -483,6 +484,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             commandDelaySeconds = ed.value.delayInt,
                             onlineMode = ed.value.onlineMode,
                             username = ed.value.username.trim(),
+                            viewDistance = ed.value.viewDistanceInt,
                         ),
                     )
                     editing = null
@@ -601,11 +603,14 @@ private data class ServerDraft(
     val commandDelaySeconds: String = "5",
     val onlineMode: Boolean = false,
     val username: String = "",
+    val viewDistance: String = "12",
 ) {
     val portInt: Int get() = port.toIntOrNull()?.coerceIn(1, 65535) ?: 25565
     val delayInt: Int get() = commandDelaySeconds.toIntOrNull()?.coerceIn(0, 3600) ?: 5
+    val viewDistanceInt: Int get() = viewDistance.toIntOrNull()?.coerceIn(2, 12) ?: 12
     val portValid: Boolean get() = port.toIntOrNull()?.let { it in 1..65535 } ?: false
     val delayValid: Boolean get() = commandDelaySeconds.toIntOrNull()?.let { it in 0..3600 } ?: false
+    val viewDistanceValid: Boolean get() = viewDistance.toIntOrNull()?.let { it in 2..12 } ?: false
 
     companion object {
         fun from(s: ServerEntity) = ServerDraft(
@@ -616,6 +621,7 @@ private data class ServerDraft(
             commandDelaySeconds = s.commandDelaySeconds.toString(),
             onlineMode = s.onlineMode,
             username = s.username,
+            viewDistance = s.viewDistance.toString(),
         )
     }
 }
@@ -671,10 +677,34 @@ private fun ServerDialog(
                         singleLine = true,
                     )
                 }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("View distance (chunks)", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Higher = more chunks loaded from server (2–12). Farm production depends on the server's simulation-distance, not this.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    OutlinedTextField(
+                        draft.viewDistance,
+                        { onChange(draft.copy(viewDistance = it)) },
+                        label = { Text("Chunks") },
+                        singleLine = true,
+                        modifier = Modifier.width(110.dp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        isError = !draft.viewDistanceValid,
+                        supportingText = if (!draft.viewDistanceValid) { { Text("2–12") } } else null,
+                    )
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = onSave, enabled = draft.host.isNotBlank() && draft.portValid && draft.delayValid) { Text("Save") }
+            TextButton(onClick = onSave, enabled = draft.host.isNotBlank() && draft.portValid && draft.delayValid && draft.viewDistanceValid) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -932,5 +962,6 @@ private fun buildConfig(context: Context, server: ServerEntity): String =
         .put("tokenCachePath", File(context.filesDir, "ms_token.json").absolutePath)
         .put("auth", if (server.onlineMode) "microsoft" else "offline")
         .put("username", server.username.ifBlank { "AFKBot" })
+        .put("viewDistance", server.viewDistance.coerceIn(2, 12))
         .put("profilesFolder", File(context.filesDir, "minecraft-auth").absolutePath)
         .toString()

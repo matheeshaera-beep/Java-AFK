@@ -149,6 +149,11 @@ function createBot() {
     version: false
   }
 
+  const vd = parseInt(config.viewDistance, 10)
+  if (!isNaN(vd) && vd >= 2 && vd <= 12) {
+    opts.viewDistance = vd
+  }
+
   if (config.auth === 'microsoft' && config.accessToken) {
     opts.accessToken = config.accessToken
   }
