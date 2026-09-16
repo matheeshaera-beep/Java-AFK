@@ -440,6 +440,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             chatCommand = draft.value.chatCommand.trim(),
                             commandDelaySeconds = draft.value.delayInt,
                             onlineMode = draft.value.onlineMode,
+                            username = draft.value.username.trim(),
                         ),
                     )
                     showAdd = false
@@ -469,6 +470,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             chatCommand = ed.value.chatCommand.trim(),
                             commandDelaySeconds = ed.value.delayInt,
                             onlineMode = ed.value.onlineMode,
+                            username = ed.value.username.trim(),
                         ),
                     )
                     editing = null
@@ -581,6 +583,7 @@ private data class ServerDraft(
     val chatCommand: String = "",
     val commandDelaySeconds: String = "5",
     val onlineMode: Boolean = false,
+    val username: String = "",
 ) {
     val portInt: Int get() = port.toIntOrNull() ?: 25565
     val delayInt: Int get() = commandDelaySeconds.toIntOrNull() ?: 5
@@ -593,6 +596,7 @@ private data class ServerDraft(
             chatCommand = s.chatCommand,
             commandDelaySeconds = s.commandDelaySeconds.toString(),
             onlineMode = s.onlineMode,
+            username = s.username,
         )
     }
 }
@@ -622,6 +626,15 @@ private fun ServerDialog(
                 ) {
                     Text("Microsoft account (online mode)")
                     Switch(checked = draft.onlineMode, onCheckedChange = { onChange(draft.copy(onlineMode = it)) })
+                }
+                if (!draft.onlineMode) {
+                    OutlinedTextField(
+                        draft.username,
+                        { onChange(draft.copy(username = it)) },
+                        label = { Text("Offline username") },
+                        placeholder = { Text("AFKBot") },
+                        singleLine = true,
+                    )
                 }
             }
         },
@@ -870,5 +883,6 @@ private fun buildConfig(context: Context, server: ServerEntity): String =
         .put("commandDelaySeconds", if (server.commandDelaySeconds > 0) server.commandDelaySeconds else 5)
         .put("tokenCachePath", File(context.filesDir, "ms_token.json").absolutePath)
         .put("auth", if (server.onlineMode) "microsoft" else "offline")
+        .put("username", server.username.ifBlank { "AFKBot" })
         .put("profilesFolder", File(context.filesDir, "minecraft-auth").absolutePath)
         .toString()

@@ -24,6 +24,7 @@ data class ServerEntity(
     val chatCommand: String = "",
     val commandDelaySeconds: Int = 5,
     val onlineMode: Boolean = false,
+    val username: String = "",
 )
 
 @Dao
@@ -44,7 +45,7 @@ interface ServerDao {
     suspend fun delete(server: ServerEntity)
 }
 
-@Database(entities = [ServerEntity::class], version = 2, exportSchema = false)
+@Database(entities = [ServerEntity::class], version = 3, exportSchema = false)
 abstract class AfkDatabase : RoomDatabase() {
     abstract fun serverDao(): ServerDao
 
@@ -58,13 +59,19 @@ abstract class AfkDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE servers ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun get(context: Context): AfkDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext,
                     AfkDatabase::class.java,
                     "afk.db",
-                ).addMigrations(MIGRATION_1_2)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build().also { instance = it }
             }
     }
