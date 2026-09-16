@@ -14,6 +14,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
@@ -92,7 +93,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -106,7 +106,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -190,6 +192,11 @@ private fun AfkApp(dark: Boolean, onToggleDark: (Boolean) -> Unit) {
         scope.launch { drawerState.close() }
     }
 
+    // Back returns from session to server list instead of exiting
+    BackHandler(enabled = selectedId != null) {
+        selectedId = null
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -198,6 +205,7 @@ private fun AfkApp(dark: Boolean, onToggleDark: (Boolean) -> Unit) {
                 selectedId = selectedId,
                 onToggleDark = onToggleDark,
                 onSelectServer = { id -> openServer(id) },
+                drawerOpen = drawerState.isOpen,
             )
         },
     ) {
@@ -241,11 +249,11 @@ private fun DrawerContent(
     selectedId: Long?,
     onToggleDark: (Boolean) -> Unit,
     onSelectServer: (Long) -> Unit,
+    drawerOpen: Boolean,
 ) {
     val dao = AppGraph.db.serverDao()
     val servers by dao.all().collectAsState(initial = emptyList())
-    val runningId = AppGraph.runningEngine()?.first
-    val drawerOpen = true
+    val runningId by AppGraph.runningEngineIdFlow().collectAsState(initial = null)
 
     ModalDrawerSheet(
         drawerContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -416,7 +424,10 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                         server = server,
                         onSelect = onSelect,
                         onEdit = { editing = server },
-                        onDelete = { scope.launch { dao.delete(server) } },
+                        onDelete = {
+                            AppGraph.removeEngine(server.id)
+                            scope.launch { dao.delete(server) }
+                        },
                     )
                 }
             }
@@ -429,7 +440,10 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
             title = "Add server",
             draft = draft.value,
             onChange = { draft.value = it },
-            onDismiss = { showAdd = false },
+            onDismiss = {
+                showAdd = false
+                draft.value = ServerDraft()
+            },
             onSave = {
                 scope.launch {
                     dao.insert(
@@ -450,10 +464,8 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
         )
     }
 
-    val editDraft = remember { mutableLongStateOf(-1L) }
     editing?.let { server ->
         val ed = remember(server.id) { mutableStateOf(ServerDraft.from(server)) }
-        editDraft.longValue = server.id
         ServerDialog(
             title = "Edit server",
             draft = ed.value,
@@ -482,6 +494,11 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
 
 private val faviconCache = java.util.concurrent.ConcurrentHashMap<String, android.graphics.Bitmap>()
 
+private fun cacheFavicon(key: String, bmp: android.graphics.Bitmap) {
+    if (faviconCache.size >= 32) faviconCache.clear()
+    faviconCache[key] = bmp
+}
+
 @Composable
 private fun ServerRow(
     server: ServerEntity,
@@ -503,7 +520,7 @@ private fun ServerRow(
             val bmp = withContext(Dispatchers.IO) {
                 ServerPinger.fetchFavicon(server.host, server.port)
             }
-            if (bmp != null) faviconCache[cacheKey] = bmp
+            if (bmp != null) cacheFavicon(cacheKey, bmp)
             favicon = bmp
         }
     }
@@ -585,8 +602,10 @@ private data class ServerDraft(
     val onlineMode: Boolean = false,
     val username: String = "",
 ) {
-    val portInt: Int get() = port.toIntOrNull() ?: 25565
-    val delayInt: Int get() = commandDelaySeconds.toIntOrNull() ?: 5
+    val portInt: Int get() = port.toIntOrNull()?.coerceIn(1, 65535) ?: 25565
+    val delayInt: Int get() = commandDelaySeconds.toIntOrNull()?.coerceIn(0, 3600) ?: 5
+    val portValid: Boolean get() = port.toIntOrNull()?.let { it in 1..65535 } ?: false
+    val delayValid: Boolean get() = commandDelaySeconds.toIntOrNull()?.let { it in 0..3600 } ?: false
 
     companion object {
         fun from(s: ServerEntity) = ServerDraft(
@@ -616,9 +635,25 @@ private fun ServerDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(draft.name, { onChange(draft.copy(name = it)) }, label = { Text("Name") }, singleLine = true)
                 OutlinedTextField(draft.host, { onChange(draft.copy(host = it)) }, label = { Text("Host") }, singleLine = true)
-                OutlinedTextField(draft.port, { onChange(draft.copy(port = it)) }, label = { Text("Port") }, singleLine = true)
+                OutlinedTextField(
+                    draft.port,
+                    { onChange(draft.copy(port = it)) },
+                    label = { Text("Port") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = !draft.portValid,
+                    supportingText = if (!draft.portValid) { { Text("Port must be 1–65535") } } else null,
+                )
                 OutlinedTextField(draft.chatCommand, { onChange(draft.copy(chatCommand = it)) }, label = { Text("Chat command (optional)") }, singleLine = true)
-                OutlinedTextField(draft.commandDelaySeconds, { onChange(draft.copy(commandDelaySeconds = it)) }, label = { Text("Command delay (seconds)") }, singleLine = true)
+                OutlinedTextField(
+                    draft.commandDelaySeconds,
+                    { onChange(draft.copy(commandDelaySeconds = it)) },
+                    label = { Text("Command delay (seconds)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = !draft.delayValid,
+                    supportingText = if (!draft.delayValid) { { Text("Delay must be 0–3600") } } else null,
+                )
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -639,7 +674,7 @@ private fun ServerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onSave, enabled = draft.host.isNotBlank()) { Text("Save") }
+            TextButton(onClick = onSave, enabled = draft.host.isNotBlank() && draft.portValid && draft.delayValid) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -742,18 +777,31 @@ private fun SessionScreen(
             }
 
             Text("Chat command:", style = MaterialTheme.typography.titleSmall)
+            var chatCommandText by remember(serverId) { mutableStateOf(srv.chatCommand) }
+            var delayText by remember(serverId) { mutableStateOf(srv.commandDelaySeconds.toString()) }
+            LaunchedEffect(chatCommandText) {
+                if (chatCommandText != srv.chatCommand) {
+                    delay(600)
+                    dao.update(srv.copy(chatCommand = chatCommandText))
+                }
+            }
+            LaunchedEffect(delayText) {
+                val parsed = delayText.toIntOrNull()
+                if (parsed != null && parsed != srv.commandDelaySeconds) {
+                    delay(600)
+                    dao.update(srv.copy(commandDelaySeconds = parsed))
+                }
+            }
             OutlinedTextField(
-                value = srv.chatCommand,
-                onValueChange = { v -> scope.launch { dao.update(srv.copy(chatCommand = v)) } },
+                value = chatCommandText,
+                onValueChange = { chatCommandText = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Command sent after spawning") },
                 singleLine = true,
             )
             OutlinedTextField(
-                value = srv.commandDelaySeconds.toString(),
-                onValueChange = { v ->
-                    scope.launch { dao.update(srv.copy(commandDelaySeconds = v.toIntOrNull() ?: 5)) }
-                },
+                value = delayText,
+                onValueChange = { delayText = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Delay before command (seconds)") },
                 singleLine = true,
@@ -837,7 +885,7 @@ private fun SessionScreen(
 
     authRequired?.let { (url, code) ->
         AlertDialog(
-            onDismissRequest = {},
+            onDismissRequest = { engine.authRequired.value = null },
             title = { Text("Finish sign-in") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

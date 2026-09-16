@@ -31,7 +31,7 @@ class JavaEngine(private val context: Context) {
     private var pollStarted = false
     private var nodeIdle = MutableStateFlow(true)
 
-    // State flows (mirror AfkEngine)
+    // State flows
     private val _state = MutableStateFlow("disconnected")
     private val _detail = MutableStateFlow("")
     private val _logs = MutableStateFlow<List<String>>(emptyList())
@@ -132,16 +132,9 @@ class JavaEngine(private val context: Context) {
         scope.launch {
             val authDir = File(context.filesDir, "minecraft-auth")
             if (authDir.exists()) deleteRecursive(authDir)
+            val tokenFile = File(context.filesDir, "ms_token.json")
+            if (tokenFile.exists()) tokenFile.delete()
             pushLog("Saved login token cleared")
-        }
-    }
-
-    fun statusJson(): String {
-        return try {
-            val res = client.newCall(Request.Builder().url("$baseUrl/status").build()).execute()
-            res.body?.string() ?: "{}"
-        } catch (e: Exception) {
-            "{}"
         }
     }
 
@@ -206,12 +199,17 @@ class JavaEngine(private val context: Context) {
             try {
                 val result = startNodeWithArguments(args)
                 nodeStarted = false
-                _state.value = "error"
-                pushLog("Node.js exited with result: $result")
+                // Only surface an error if we're not mid-session (a newer start may be in flight)
+                if (_state.value != "disconnected") {
+                    _state.value = "error"
+                    pushLog("Node.js exited with result: $result")
+                }
             } catch (e: Throwable) {
                 nodeStarted = false
-                _state.value = "error"
-                pushLog("Node.js crash: ${e.message}")
+                if (_state.value != "disconnected") {
+                    _state.value = "error"
+                    pushLog("Node.js crash: ${e.message}")
+                }
             }
         }, "NodeThread").start()
         nodeStarted = true
@@ -223,9 +221,7 @@ class JavaEngine(private val context: Context) {
         while (attempts < 30) {
             try {
                 val res = client.newCall(Request.Builder().url("$baseUrl/status").build()).execute()
-                if (res.isSuccessful) {
-                    return true
-                }
+                res.use { if (it.isSuccessful) return true }
             } catch (e: Exception) {}
             Thread.sleep(500)
             attempts++
@@ -235,15 +231,16 @@ class JavaEngine(private val context: Context) {
 
     private suspend fun pollStatus() {
         while (nodeStarted) {
+            if (nodeIdle.value) {
+                // Session stopped — exit the loop so the next start() restarts it
+                pollStarted = false
+                return
+            }
             try {
                 val res = client.newCall(Request.Builder().url("$baseUrl/status").build()).execute()
                 if (res.isSuccessful) {
                     val body = res.body?.string() ?: "{}"
                     val obj = try { JSONObject(body) } catch (e: Exception) { JSONObject() }
-                    if (nodeIdle.value) {
-                        delay(3000)
-                        continue
-                    }
                     val connected = obj.optBoolean("connected")
                     if (connected) {
                         _state.value = "connected"
@@ -269,6 +266,19 @@ class JavaEngine(private val context: Context) {
                 }
             } catch (e: Exception) {}
             delay(3000)
+        }
+    }
+
+    fun dispose() {
+        scope.launch {
+            mutex.withLock {
+                if (_state.value != "disconnected") {
+                    sendCommand(JSONObject().put("type", "stop"))
+                }
+                nodeIdle.value = true
+                _state.value = "disconnected"
+                _detail.value = ""
+            }
         }
     }
 
