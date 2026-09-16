@@ -1,0 +1,9 @@
+{
+  "name": "java-afk-bot",
+  "version": "1.0.0",
+  "main": "main.js",
+  "dependencies": {
+    "mineflayer": "^4.27.0",
+    "prismarine-chat": "^1.7.1"
+  }
+}

@@ -1,0 +1,1 @@
+// Top-level build file. Plugin versions are declared per-module in app/build.gradle.kts.
