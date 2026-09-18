@@ -1,0 +1,3 @@
+module github.com/mstheesha/bedrock-afk
+
+go 1.27

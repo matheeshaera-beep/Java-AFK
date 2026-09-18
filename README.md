@@ -1,70 +1,79 @@
 # Java AFK
 
-An Android app that runs a **Minecraft Java Edition** AFK bot on your phone using an embedded [mineflayer](https://github.com/PrismarineJS/mineflayer) bot powered by a bundled Node.js engine (via JNI).
-
-Keeps you AFK-safe on Java servers: auto-connect, auto-reconnect, chat commands, health/food monitoring, and a clean Material 3 UI.
+Android app that keeps your Minecraft **Java Edition** account online (AFK) on any
+server — backed by [mineflayer](https://github.com/PrismarineJS/mineflayer)
+running on an embedded Node.js runtime, plus a Go
+[gophertunnel](https://github.com/Sandertv/gophertunnel)-based Bedrock engine
+for headless/CLI use.
 
 ## Features
 
-- **Embedded Node.js runtime** — no server or PC needed; the bot runs entirely on the device.
-- **Multiple servers** — add Java servers (host + port), each with its own engine/session.
-- **Start / Stop / Reconnect** — full session lifecycle control, with automatic reconnect on kick/disconnect.
-- **Microsoft account auth** — device-code sign-in for online-mode servers, tokens cached on-device.
-- **Offline / cracked servers** — switch to offline mode per server.
-- **AFK automation** — optional chat command sent after spawning, with a configurable delay.
-- **Live status** — state, connection detail, health/food, position, and recent logs.
-- **Resource panel** — CPU / RAM / network usage shown in the navigation drawer.
-- **Dark mode** — Material 3 theme light/dark toggle, persisted.
-- **Server pinging** — reachability and server icon (favicon) fetched per server.
+- **Server list** — add, edit and delete servers (name, host, port).
+- **Online + offline mode** — Microsoft device-code sign-in with saved token,
+  or offline usernames.
+- **Up to 2 bots at once**, each with its own session screen.
+- **Live connection stages** — bridge boot → connecting → authenticating →
+  logging in → connected, with an "Online as X · auth · host:port" summary.
+- **Live logs + chat** — bridge log stream, per-server chat send/receive.
+- **AFK timer + data usage** — per-server counters that reset on Stop.
+- **Health + hunger** logged every 10 s while connected.
+- **Foreground service** — persistent notification shows the running server(s)
+  with a force-stop action; per-server wake lock.
+- **Resource monitor** — CPU / RAM drawer panel, dark mode.
 
-## What it does
+## How to use
 
-1. You add a server (e.g. `donutsmp.net:25565`).
-2. Tap **Start**, and the app boots the embedded Node.js runtime running `mineflayer`.
-3. The bot connects, (optionally) authenticates with your Microsoft account, spawns, and goes AFK.
-4. The app polls the bridge and shows live health/food, connection state, and logs.
-5. If the bot is kicked or the connection drops, it reconnects automatically while the session is active.
+1. Install the APK from the
+   [v2.0 release](https://github.com/matheeshaera-beep/java-afk-app/releases/tag/v2.0).
+2. Open the app, tap **+**, enter a server (e.g. Name `Donut SMP`,
+   Host `donutsmp.net`, Port `25565`).
+3. Open the server, tap **Start**.
+4. If it uses online mode, tap **Open browser** in the sign-in dialog, log in
+   with your Microsoft account and enter the shown code, then tap **Done**.
+5. The state turns **Connected** (`Online as <you>`) and the bot idles on the
+   server. Optional: set a chat command + delay in the ⚙ settings — it runs
+   after every spawn.
+6. **Stop** disconnects (timer + data reset). The ✕ action on the notification
+   force-stops the service and all sessions.
 
-## Project layout
+Tips:
 
-```
-android/            Android app (Kotlin + Compose Material 3 UI)
-  app/src/main/java/    UI, engines, DB, service, resource monitoring
-  app/src/main/cpp/     JNI bridge that embeds libnode
-  app/src/main/jniLibs/ Prebuilt libnode.so per ABI
-  app/src/main/assets/nodejs-project/   Bundled bot JS + package.json
-nodejs-project/     Source of the mineflayer bot (main.js)
-```
+- The log tab shows everything the bridge reports (connect, auth, kicks,
+  errors, reconnects).
+- If Microsoft asks again later, use **Clear token** in the server settings
+  and Start again.
+- Two servers can run at the same time; a third Start is refused with a message.
 
-The `nodejs-project/main.js` is the bot's bridge: an HTTP server on `127.0.0.1:3000` that the app talks to (`/start`, `/stop`, `/reconnect`, `/chat`, `/status`, `/logs`).
+## Build from source
 
-## Building
+Requirements: JDK 17, Android SDK (compileSdk 37, NDK 29), Go 1.27+ for the
+engine/CLI.
 
-Requirements:
-- JDK 17
-- Android SDK (compileSdk 37, NDK 29)
-- Node.js installed for dependency installs only (not required to run the app)
-
-```bash
-# 1. Install the bot's JS dependencies (do this in both places, they are copied
-#    together by the Android build):
-#    - nodejs-project/
-#    - android/app/src/main/assets/nodejs-project/
-npm install
-
-# 2. Build the debug APK
+```sh
 cd android
-./gradlew assembleDebug
+./gradlew :app:assembleDebug        # APK -> app/build/outputs/apk/debug/
+go build ./...                      # Go engine + CLI (repo root)
 ```
 
-The APK bundles the prebuilt `libnode.so` for `arm64-v8a`, `armeabi-v7a`, `x86`, and `x86_64`.
+Notes for developers:
 
-> Note: `node_modules/` is intentionally gitignored — run `npm install` locally before building.
+- `android/` embeds Node.js v18 (`jniLibs/arm64-v8a`) through a small JNI
+  bridge (`native-lib.cpp` — `node::Start` runs exactly once per process).
+- The mineflayer bot project lives in
+  `android/app/src/main/assets/nodejs-project/` (vendored `node_modules`,
+  including the full `minecraft-data` Java protocol payload the bot needs).
+  On first Start the app copies it to internal storage (stamp-guarded).
+- The local HTTP bridge defaults to `http://127.0.0.1:3001`
+  (`NodeRuntime.baseUrl`, `BRIDGE_PORT` in `main.js`).
+- `engine/` is the standalone Bedrock client (RakNet handshake, Xbox auth,
+  spawn, keep-alive, reconnect policy); `cmd/afkcli` is its CLI.
 
-## Android bridge
+## Donate
 
-The app ships with an included native library (`afkbridge.aar`) that starts and embeds a Node.js instance inside the Android process. `JavaEngine` in Kotlin serializes commands (start/stop/reconnect/chat) against the Node.js HTTP bridge, and a foreground service keeps the session alive.
+If this app keeps your farms chunk-loaded, consider supporting it:
+
+**[buymeacoffee.com/matheeshaex](https://buymeacoffee.com/matheeshaex)**
 
 ## License
 
-Source in this repository is provided for personal/educational use.
+Personal project — all rights reserved unless stated otherwise.

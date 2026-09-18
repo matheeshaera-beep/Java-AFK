@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -37,6 +38,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -56,9 +58,9 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -109,6 +111,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -253,7 +256,7 @@ private fun DrawerContent(
 ) {
     val dao = AppGraph.db.serverDao()
     val servers by dao.all().collectAsState(initial = emptyList())
-    val runningId by AppGraph.runningEngineIdFlow().collectAsState(initial = null)
+    val activeCount by AppGraph.activeCount.collectAsState(initial = 0)
 
     ModalDrawerSheet(
         drawerContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -271,6 +274,14 @@ private fun DrawerContent(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         )
+        // Running-count header for the server list below, aligned with the
+        // "Servers" header text above it.
+        Text(
+            "Active: $activeCount/${NodeRuntime.MAX_BOTS} running",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
+        )
         if (servers.isEmpty()) {
             Text(
                 "No servers.",
@@ -282,12 +293,16 @@ private fun DrawerContent(
                 NavigationDrawerItem(
                     icon = { Icon(Icons.Default.Dns, contentDescription = null) },
                     label = { Text(server.name) },
-                    selected = server.id == runningId,
+                    selected = false,
                     onClick = { onSelectServer(server.id) },
                     modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
                 )
             }
         }
+
+        // Push everything below (usage, theme, version) to the bottom so the
+        // server list owns the top of the drawer.
+        Spacer(Modifier.weight(1f))
 
         HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
 
@@ -317,8 +332,6 @@ private fun DrawerContent(
             modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding),
         )
 
-        Spacer(Modifier.weight(1f))
-
         Text(
             "Java AFK v1.0",
             style = MaterialTheme.typography.labelSmall,
@@ -342,8 +355,6 @@ private fun ResourcesPanel(active: Boolean) {
 
     val cpu by remember { derivedStateOf { stats?.cpuPercent ?: 0f } }
     val ram by remember { derivedStateOf { stats?.rssMB ?: 0L } }
-    val netRx by remember { derivedStateOf { stats?.netRxBytes ?: 0L } }
-    val netTx by remember { derivedStateOf { stats?.netTxBytes ?: 0L } }
 
     val cpuAnim by animateFloatAsState(targetValue = cpu / 100f, label = "cpu")
     val ramAnim by animateFloatAsState(targetValue = (ram.toFloat() / 256f).coerceIn(0f, 1f), label = "ram")
@@ -371,12 +382,6 @@ private fun ResourcesPanel(active: Boolean) {
             },
             supportingContent = { LinearProgressIndicator(progress = { ramAnim }) },
             leadingContent = { Icon(Icons.Default.Memory, contentDescription = null) },
-            modifier = Modifier.padding(vertical = 2.dp),
-        )
-
-        ListItem(
-            headlineContent = { Text("${formatBytes(netRx)} ↓  ${formatBytes(netTx)} ↑") },
-            leadingContent = { Icon(Icons.Default.SwapVert, contentDescription = null) },
             modifier = Modifier.padding(vertical = 2.dp),
         )
     }
@@ -425,7 +430,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                         onSelect = onSelect,
                         onEdit = { editing = server },
                         onDelete = {
-                            AppGraph.removeEngine(server.id)
+                            AppGraph.removeSession(server.id)
                             scope.launch { dao.delete(server) }
                         },
                     )
@@ -456,6 +461,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             onlineMode = draft.value.onlineMode,
                             username = draft.value.username.trim(),
                             viewDistance = draft.value.viewDistanceInt,
+                            chatMode = draft.value.chatMode,
                         ),
                     )
                     showAdd = false
@@ -485,6 +491,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             onlineMode = ed.value.onlineMode,
                             username = ed.value.username.trim(),
                             viewDistance = ed.value.viewDistanceInt,
+                            chatMode = ed.value.chatMode,
                         ),
                     )
                     editing = null
@@ -508,8 +515,12 @@ private fun ServerRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    val engine = remember(server.id) { AppGraph.engineFor(server.id) }
-    val state by engine.state.collectAsState()
+    val session = remember(server.id) { AppGraph.sessionFor(server.id) }
+    // Feed the foreground notification's server-name list.
+    LaunchedEffect(server.id, server.name) {
+        AppGraph.noteServerName(server.id, server.name)
+    }
+    val state by session.state.collectAsState()
     val cacheKey = "${server.host}:${server.port}"
     var favicon by remember(cacheKey) {
         mutableStateOf(faviconCache[cacheKey])
@@ -576,8 +587,10 @@ private fun ServerRow(
 
             Column(Modifier.weight(1f)) {
                 Text(server.name, style = MaterialTheme.typography.titleMedium)
+                // Host only — every server uses the same port, so it is noise.
+                // host/port stay in the entity for favicon, ping, connect.
                 Text(
-                    "${server.host}:${server.port}",
+                    server.host,
                     style = MaterialTheme.typography.bodySmall,
                     color = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -604,13 +617,12 @@ private data class ServerDraft(
     val onlineMode: Boolean = false,
     val username: String = "",
     val viewDistance: String = "12",
+    val chatMode: String = "enabled", // enabled | commandsOnly | hidden
 ) {
     val portInt: Int get() = port.toIntOrNull()?.coerceIn(1, 65535) ?: 25565
     val delayInt: Int get() = commandDelaySeconds.toIntOrNull()?.coerceIn(0, 3600) ?: 5
     val viewDistanceInt: Int get() = viewDistance.toIntOrNull()?.coerceIn(2, 12) ?: 12
     val portValid: Boolean get() = port.toIntOrNull()?.let { it in 1..65535 } ?: false
-    val delayValid: Boolean get() = commandDelaySeconds.toIntOrNull()?.let { it in 0..3600 } ?: false
-    val viewDistanceValid: Boolean get() = viewDistance.toIntOrNull()?.let { it in 2..12 } ?: false
 
     companion object {
         fun from(s: ServerEntity) = ServerDraft(
@@ -622,6 +634,21 @@ private data class ServerDraft(
             onlineMode = s.onlineMode,
             username = s.username,
             viewDistance = s.viewDistance.toString(),
+            chatMode = s.chatMode,
+        )
+    }
+}
+
+@Composable
+private fun ChatModeChip(label: String, value: String, current: String, onClick: () -> Unit) {
+    val selected = current == value
+    TextButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -650,16 +677,6 @@ private fun ServerDialog(
                     isError = !draft.portValid,
                     supportingText = if (!draft.portValid) { { Text("Port must be 1–65535") } } else null,
                 )
-                OutlinedTextField(draft.chatCommand, { onChange(draft.copy(chatCommand = it)) }, label = { Text("Chat command (optional)") }, singleLine = true)
-                OutlinedTextField(
-                    draft.commandDelaySeconds,
-                    { onChange(draft.copy(commandDelaySeconds = it)) },
-                    label = { Text("Command delay (seconds)") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    isError = !draft.delayValid,
-                    supportingText = if (!draft.delayValid) { { Text("Delay must be 0–3600") } } else null,
-                )
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -677,6 +694,64 @@ private fun ServerDialog(
                         singleLine = true,
                     )
                 }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSave, enabled = draft.host.isNotBlank() && draft.portValid) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// Per-server settings, moved off the main session screen. Edits auto-save
+// to the database with the same debounce as the old inline fields.
+@Composable
+private fun ServerSettingsDialog(
+    server: ServerEntity,
+    session: ServerSession,
+    snackbarHostState: SnackbarHostState,
+    onDismiss: () -> Unit,
+) {
+    val dao = AppGraph.db.serverDao()
+    val scope = rememberCoroutineScope()
+    var chatCommandText by remember(server.id) { mutableStateOf(server.chatCommand) }
+    var delayText by remember(server.id) { mutableStateOf(server.commandDelaySeconds.toString()) }
+    var viewDistanceText by remember(server.id) { mutableStateOf(server.viewDistance.toString()) }
+    var chatModeValue by remember(server.id) { mutableStateOf(server.chatMode) }
+    LaunchedEffect(chatCommandText) {
+        if (chatCommandText != server.chatCommand) {
+            delay(600)
+            dao.update(server.copy(chatCommand = chatCommandText))
+        }
+    }
+    LaunchedEffect(delayText) {
+        val parsed = delayText.toIntOrNull()
+        if (parsed != null && parsed != server.commandDelaySeconds) {
+            delay(600)
+            dao.update(server.copy(commandDelaySeconds = parsed))
+        }
+    }
+    LaunchedEffect(viewDistanceText) {
+        val parsed = viewDistanceText.toIntOrNull()?.coerceIn(2, 12)
+        if (parsed != null && parsed != server.viewDistance) {
+            delay(600)
+            dao.update(server.copy(viewDistance = parsed))
+        }
+    }
+    LaunchedEffect(chatModeValue) {
+        if (chatModeValue != server.chatMode) {
+            delay(600)
+            dao.update(server.copy(chatMode = chatModeValue))
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("${server.name} settings") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -691,22 +766,51 @@ private fun ServerDialog(
                         )
                     }
                     OutlinedTextField(
-                        draft.viewDistance,
-                        { onChange(draft.copy(viewDistance = it)) },
+                        value = viewDistanceText,
+                        onValueChange = { viewDistanceText = it },
                         label = { Text("Chunks") },
                         singleLine = true,
                         modifier = Modifier.width(110.dp),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        isError = !draft.viewDistanceValid,
-                        supportingText = if (!draft.viewDistanceValid) { { Text("2–12") } } else null,
                     )
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Public chat", style = MaterialTheme.typography.bodyLarge)
+                    Row {
+                        ChatModeChip("Enabled", "enabled", chatModeValue) { chatModeValue = "enabled" }
+                        ChatModeChip("Commands only", "commandsOnly", chatModeValue) { chatModeValue = "commandsOnly" }
+                        ChatModeChip("Hidden", "hidden", chatModeValue) { chatModeValue = "hidden" }
+                    }
+                }
+                OutlinedTextField(
+                    value = chatCommandText,
+                    onValueChange = { chatCommandText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Command sent after spawning") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = delayText,
+                    onValueChange = { delayText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Delay before command (seconds)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                OutlinedButton(onClick = {
+                    session.clearToken()
+                    scope.launch { snackbarHostState.showSnackbar("Saved login token cleared") }
+                }) {
+                    Icon(Icons.Default.Close, contentDescription = null)
+                    Text(" Clear token")
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = onSave, enabled = draft.host.isNotBlank() && draft.portValid && draft.delayValid && draft.viewDistanceValid) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
     )
 }
 
@@ -718,25 +822,41 @@ private fun SessionScreen(
 ) {
     val ctx = LocalContext.current
     val dao = AppGraph.db.serverDao()
-    val engine = remember(serverId) { AppGraph.engineFor(serverId) }
+    val session = remember(serverId) { AppGraph.sessionFor(serverId) }
 
     val server by dao.byId(serverId).collectAsState(initial = null)
 
-    val state by engine.state.collectAsState()
-    val detail by engine.detail.collectAsState()
-    val logs by engine.logs.collectAsState()
-    val chat by engine.chat.collectAsState()
-    val authRequired by engine.authRequired.collectAsState()
+    val state by session.state.collectAsState()
+    val detail by session.detail.collectAsState()
+    val logs by session.logs.collectAsState()
+    val chat by session.chat.collectAsState()
+    val authRequired by session.authRequired.collectAsState()
+    val activeCount by AppGraph.activeCount.collectAsState(initial = 0)
     var kickedCount by remember { mutableIntStateOf(0) }
     var chatInput by remember { mutableStateOf("") }
     var showChat by remember { mutableStateOf(false) }
+    var showSettings by remember(serverId) { mutableStateOf(false) }
+    // Session-owned counters: keep ticking while connected even when this
+    // screen is closed and reopened.
+    val afkSeconds by session.afkSeconds.collectAsState()
+    val sessionData by session.sessionDataBytes.collectAsState()
     val scope = rememberCoroutineScope()
+    val canStart = state == "disconnected" || state == "error"
 
-    LaunchedEffect(engine.kickedCount) {
-        if (engine.kickedCount > kickedCount) {
-            snackbarHostState.showSnackbar("Kicked or disconnected: ${engine.detail.value}")
+    // Only poll the localbridge for chat while the chat tab is open (no data waste).
+    LaunchedEffect(showChat) {
+        session.setChatPolling(showChat)
+        if (showChat) {
+            // Ensure server chat already ingested is shown, even if status poll is idle.
+            session.refreshChatNow()
         }
-        kickedCount = engine.kickedCount
+    }
+
+    LaunchedEffect(session.kickedCount) {
+        if (session.kickedCount > kickedCount) {
+            snackbarHostState.showSnackbar("Kicked or disconnected: ${session.detail.value}")
+        }
+        kickedCount = session.kickedCount
     }
 
     Column(
@@ -758,12 +878,31 @@ private fun SessionScreen(
 
             val srv = server!!
 
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("${srv.name} — ${srv.host}:${srv.port}", style = MaterialTheme.typography.titleMedium)
-                    Text("State: ${stateLabel(state)}", style = MaterialTheme.typography.bodyLarge)
-                    if (detail.isNotBlank()) {
-                        Text(detail, style = MaterialTheme.typography.bodySmall)
+            LaunchedEffect(srv.id, srv.name) {
+                AppGraph.noteServerName(srv.id, srv.name)
+            }
+
+            Card(Modifier.fillMaxWidth().animateContentSize()) {
+                // Name is centered in the full card width (gear overlays the
+                // right edge) so it stays exactly centered.
+                Box(Modifier.fillMaxWidth().padding(16.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            srv.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.fillMaxWidth(),
+                            textAlign = TextAlign.Center,
+                        )
+                        Text("State: ${stateLabel(state)}", style = MaterialTheme.typography.bodyLarge)
+                        if (detail.isNotBlank()) {
+                            Text(detail, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    IconButton(
+                        onClick = { showSettings = true },
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = "Server settings")
                     }
                 }
             }
@@ -775,67 +914,56 @@ private fun SessionScreen(
             ) {
                 Button(
                     onClick = {
-                        engine.start(buildConfig(ctx, srv))
-                        ctx.startForegroundService(Intent(ctx, AfkService::class.java).setAction(AfkService.ACTION_START))
+                        if (activeCount >= NodeRuntime.MAX_BOTS) {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("Maximum ${NodeRuntime.MAX_BOTS} servers can run at the same time.")
+                            }
+                        } else {
+                            session.start(buildConfig(ctx, srv))
+                            ctx.startForegroundService(Intent(ctx, AfkService::class.java).setAction(AfkService.ACTION_START))
+                        }
                     },
-                    enabled = state == "disconnected" || state == "error",
+                    enabled = canStart,
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Text(" Start")
                 }
                 Button(
-                    onClick = { engine.stop() },
+                    onClick = { session.stop() },
                     enabled = state != "disconnected",
                 ) {
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Text(" Stop")
                 }
                 OutlinedButton(
-                    onClick = { engine.reconnect() },
+                    onClick = { session.reconnect() },
                     enabled = state == "connected" || state == "error",
                 ) {
                     Icon(Icons.Default.Refresh, contentDescription = null)
                     Text(" Reconnect")
                 }
-                OutlinedButton(onClick = {
-                    engine.clearToken()
-                    scope.launch { snackbarHostState.showSnackbar("Saved login token cleared") }
-                }) {
-                    Icon(Icons.Default.Close, contentDescription = null)
-                    Text(" Clear token")
-                }
             }
 
-            Text("Chat command:", style = MaterialTheme.typography.titleSmall)
-            var chatCommandText by remember(serverId) { mutableStateOf(srv.chatCommand) }
-            var delayText by remember(serverId) { mutableStateOf(srv.commandDelaySeconds.toString()) }
-            LaunchedEffect(chatCommandText) {
-                if (chatCommandText != srv.chatCommand) {
-                    delay(600)
-                    dao.update(srv.copy(chatCommand = chatCommandText))
-                }
-            }
-            LaunchedEffect(delayText) {
-                val parsed = delayText.toIntOrNull()
-                if (parsed != null && parsed != srv.commandDelaySeconds) {
-                    delay(600)
-                    dao.update(srv.copy(commandDelaySeconds = parsed))
-                }
-            }
-            OutlinedTextField(
-                value = chatCommandText,
-                onValueChange = { chatCommandText = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Command sent after spawning") },
-                singleLine = true,
+            Text(
+                "AFK time: ${formatAfkTime(afkSeconds)}",
+                style = MaterialTheme.typography.titleSmall,
             )
-            OutlinedTextField(
-                value = delayText,
-                onValueChange = { delayText = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Delay before command (seconds)") },
-                singleLine = true,
+            Text(
+                "Data: ${formatBytes(sessionData)}",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+
+        server?.let { srvd ->
+            if (showSettings) {
+                ServerSettingsDialog(
+                    server = srvd,
+                    session = session,
+                    snackbarHostState = snackbarHostState,
+                    onDismiss = { showSettings = false },
+                )
+            }
         }
 
         Column(
@@ -861,23 +989,51 @@ private fun SessionScreen(
             }
 
             Card(Modifier.fillMaxWidth().weight(1f)) {
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(12.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    if (showChat) {
-                        chat.takeLast(40).forEach { line ->
-                            Text(
-                                line,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                            )
+                // LazyColumn is the scroll workhorse: item-based, reliably
+                // finger-scrollable and accessibility-visible. The input row
+                // overlays the bottom; bottom padding reserves its space.
+                Box(Modifier.fillMaxSize().padding(12.dp)) {
+                    val listState = rememberLazyListState()
+                    LazyColumn(
+                        Modifier
+                            .fillMaxSize()
+                            .padding(bottom = if (showChat) 76.dp else 0.dp),
+                        state = listState,
+                    ) {
+                        if (showChat) {
+                            items(chat.takeLast(40)) { line ->
+                                val sender = line.sender?.let { "<$it> " } ?: ""
+                                val color = when (line.type) {
+                                    "chat" -> MaterialTheme.colorScheme.onSurface
+                                    "system" -> MaterialTheme.colorScheme.tertiary
+                                    "whisper" -> MaterialTheme.colorScheme.secondary
+                                    "error" -> MaterialTheme.colorScheme.error
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                                Text(
+                                    "$sender${line.text}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = color,
+                                )
+                            }
+                        } else {
+                            items(logs.takeLast(40)) { line ->
+                                Text(
+                                    line,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                            }
                         }
+                    }
+                    if (showChat) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth(),
                         ) {
                             OutlinedTextField(
                                 value = chatInput,
@@ -890,7 +1046,7 @@ private fun SessionScreen(
                                 onClick = {
                                     val msg = chatInput
                                     if (msg.isNotBlank()) {
-                                        engine.sendChat(msg)
+                                        session.sendChat(msg)
                                         chatInput = ""
                                     }
                                 },
@@ -898,14 +1054,6 @@ private fun SessionScreen(
                             ) {
                                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                             }
-                        }
-                    } else {
-                        logs.takeLast(40).forEach { line ->
-                            Text(
-                                line,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                            )
                         }
                     }
                 }
@@ -915,7 +1063,7 @@ private fun SessionScreen(
 
     authRequired?.let { (url, code) ->
         AlertDialog(
-            onDismissRequest = { engine.authRequired.value = null },
+            onDismissRequest = { session.authRequired.value = null },
             title = { Text("Finish sign-in") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -939,16 +1087,23 @@ private fun SessionScreen(
                 }) { Text("Open browser") }
             },
             dismissButton = {
-                TextButton(onClick = { engine.authRequired.value = null }) { Text("Done") }
+                TextButton(onClick = { session.authRequired.value = null }) { Text("Done") }
             },
         )
     }
 }
 
+private fun formatAfkTime(totalSeconds: Long): String {
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return "%02d:%02d:%02d".format(h, m, s)
+}
+
 private fun stateLabel(state: String): String = when (state) {
     "connected" -> "Connected"
     "connecting" -> "Connecting"
-    "authenticating" -> "Auth required"
+    "authenticating" -> "Authenticating"
     "error" -> "Error"
     else -> "Disconnected"
 }
@@ -963,5 +1118,8 @@ private fun buildConfig(context: Context, server: ServerEntity): String =
         .put("auth", if (server.onlineMode) "microsoft" else "offline")
         .put("username", server.username.ifBlank { "AFKBot" })
         .put("viewDistance", server.viewDistance.coerceIn(2, 12))
+        .put("chatMode", if (server.chatMode in CALLABLE_CHAT_MODES) server.chatMode else "enabled")
         .put("profilesFolder", File(context.filesDir, "minecraft-auth").absolutePath)
         .toString()
+
+private val CALLABLE_CHAT_MODES = setOf("enabled", "commandsOnly", "hidden")

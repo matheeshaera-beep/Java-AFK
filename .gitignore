@@ -1,15 +1,19 @@
+# Go
+*.exe
+*.test
+*.out
+
 # Android / Gradle
 android/.gradle/
 android/.kotlin/
+android/app/.cxx/
 android/local.properties
 android/**/build/
+android/app/libs/afkbridge.aar
+android/app/libs/afkbridge-sources.jar
 android/captures/
 *.apk
 *.aab
-
-# Node
-node_modules/
-android/app/src/main/assets/nodejs-project/node_modules/
 
 # Token / credentials
 token/
@@ -21,3 +25,4 @@ ms_token.json
 .DS_Store
 *.swp
 .idea/
+.opencode/

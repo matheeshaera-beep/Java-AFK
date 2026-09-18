@@ -9,22 +9,41 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "dev.mstheesha.afk"
+        applicationId = "dev.mstheesha.afk.java"
         minSdk = 35
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
-        }
+        versionCode = 6
+        versionName = "2.0"
     }
 
     ndkVersion = "29.0.14206865"
 
     buildTypes {
+        debug {
+            // arm64 for real phones + x86_64 for emulators. The 32-bit ABIs
+            // (armeabi-v7a, x86) only add ~80MB of dead libnode weight.
+            ndk {
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+        }
         release {
             isMinifyEnabled = false
+            isShrinkResources = false
             signingConfig = signingConfigs.getByName("debug")
+            ndk {
+                // Ship arm64-v8a only by default (real phones are 64-bit ARM).
+                abiFilters += listOf("arm64-v8a")
+            }
+        }
+    }
+
+    // Embedded Node MUST be extracted to real files on disk. The in-APK mmap
+    // path (extractNativeLibs=false, the release default) makes Node's dynamic
+    // loader tear down V8's mutexes mid-boot -> "destroyed mutex" SIGABRT on
+    // Start. The working debug build extracted them; release must too.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 
@@ -35,6 +54,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     externalNativeBuild {
@@ -50,8 +70,6 @@ android {
 }
 
 dependencies {
-    implementation(files("libs/afkbridge.aar"))
-
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

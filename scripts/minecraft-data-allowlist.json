@@ -1,0 +1,6 @@
+{
+  "comment": "Minecraft Java versions to keep in minecraft-data. Add server versions here, then re-run scripts/prune-minecraft-data.py and re-copy nodejs-project into android assets.",
+  "versions": [
+    "1.21.1"
+  ]
+}
