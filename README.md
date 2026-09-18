@@ -44,6 +44,17 @@ Tips:
   and Start again.
 - Two servers can run at the same time; a third Start is refused with a message.
 
+## Supported devices
+
+- **OS:** Android 15 or newer (`minSdk 35`), 64-bit only.
+- **CPU:** `arm64-v8a` physical phones; `x86_64` Android emulators. No 32-bit
+  (`armeabi-v7a`, `x86`) builds — those ABIs are not shipped.
+- **Storage:** keep ~500 MB free (the APK plus a one-time ~120 MB data copy
+  on first Start).
+- **OS page size:** 4 KB (standard). The bundled `libnode.so` is not 16 KB
+  aligned, so 16 KB-page mode is unverified and may fail to load it.
+- **Tested on:** Pixel 8.
+
 ## Build from source
 
 Requirements: JDK 17, Android SDK (compileSdk 37, NDK 29), Go 1.27+ for the
