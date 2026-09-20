@@ -103,16 +103,33 @@ object NodeRuntime {
     private fun copyNodeProjectOnce() {
         val stampFile = File(projectDir, ".app_asset_version")
         val currentStamp = BuildConfig.VERSION_NAME
-        val needsCopy = !projectDir.exists() ||
+        val needsFullCopy = !projectDir.exists() ||
             !stampFile.exists() ||
             stampFile.readTextOrNull() != currentStamp
-        if (!needsCopy) return
+        if (needsFullCopy) {
+            projectDir.deleteRecursively()
+            projectDir.mkdirs()
+            copyAssetFolder("nodejs-project", projectDir)
+            stampFile.writeText(currentStamp)
+            return
+        }
+        // DEPLOY TRAP: the stamp only proves node_modules is fresh. The entry
+        // files MUST be refreshed on every start, or a version-bumped main.js
+        // is shadowed by the stale copy in internal storage forever.
+        copyAssetFile("nodejs-project/main.js", File(projectDir, "main.js"))
+        copyAssetFile("nodejs-project/package.json", File(projectDir, "package.json"))
+    }
 
-        val assets = appContext.assets
-        projectDir.deleteRecursively()
-        projectDir.mkdirs()
-        copyAssetFolder("nodejs-project", projectDir)
-        stampFile.writeText(currentStamp)
+    private fun copyAssetFile(assetPath: String, dest: File) {
+        try {
+            appContext.assets.open(assetPath).use { input ->
+                FileOutputStream(dest).use { output ->
+                    input.copyTo(output)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("NodeRuntime", "copy $assetPath failed: ${e.message}")
+        }
     }
 
     private fun copyAssetFolder(assetPath: String, targetDir: File) {

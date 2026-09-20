@@ -13,12 +13,26 @@ const MAX_BOTS = 2 // hard limit: max 2 concurrent servers/bots
 const MAX_CHAT = 300 // ring buffer of chat messages per server
 const MAX_LOGS = 200 // ring buffer of log lines per server
 const MAX_SAVE_CHAR = 0 // placeholder to keep fs usage intentional
+const BOT_VERSION = '2.1'
+
+// Timing (overridable by env for tests).
+const CONNECT_TIMEOUT_MS = parseInt(process.env.AFK_CONNECT_TIMEOUT_MS || '60000', 10)
+const STABLE_MS = parseInt(process.env.AFK_STABLE_MS || '60000', 10)
+const BACKOFF_BASE_MS = parseInt(process.env.AFK_BACKOFF_BASE_MS || '5000', 10)
+const BACKOFF_CAP_MS = 300000 // 5 min
 
 const origLog = console.log
 
 // ============ SESSION STORE ============
 // One session entry per Minecraft server. Each owns its own bot, timers,
 // log/chat buffers and MS auth state. A single Node process hosts all of them.
+//
+// phase state machine (per session):
+//   idle -> connecting -> online -> waiting -> connecting -> ...
+//   - idle:       no bot, no timers (stopped, or auto-reconnect gave up)
+//   - connecting: bot object exists, spawn not seen yet (watchdog armed)
+//   - online:     spawn seen, bot usable
+//   - waiting:    bot down, reconnect timer armed
 const sessions = new Map() // serverId (string) -> session
 
 function newSession(serverId) {
@@ -37,10 +51,16 @@ function newSession(serverId) {
       chatMode: 'enabled'
     },
     bot: null,
-    reconnectTimer: null,
-    isConnecting: false,
     sessionActive: false,
-    creating: false,
+    phase: 'idle',
+    attempt: 0,
+    reconnectAt: 0,
+    lastError: null,
+    connectedSince: 0,
+    version: null, // cached negotiated MC version; skips the ping on retry
+    connectTimer: null,
+    stableTimer: null,
+    reconnectTimer: null,
     pendingMsaCode: null,
     logBuffer: [],
     chatBuffer: [],
@@ -73,6 +93,26 @@ function pushChat(sess, type, sender, text) {
     text: String(text)
   })
   if (sess.chatBuffer.length > MAX_CHAT) sess.chatBuffer.shift()
+}
+
+// mineflayer 4.39 hands `kicked` the raw packet.reason, which is an NBT
+// object on 1.20.3+ — String() on it gives "Kicked: [object Object]".
+function reasonText(bot, r) {
+  try {
+    return require('prismarine-chat')(bot.registry).fromNotch(r).toString() || JSON.stringify(r)
+  } catch (e) {
+    try { return typeof r === 'string' ? r : JSON.stringify(r) } catch (_) { return String(r) }
+  }
+}
+
+function clearTimer(sess, name) {
+  if (sess[name]) { clearTimeout(sess[name]); sess[name] = null }
+}
+
+function clearAllTimers(sess) {
+  clearTimer(sess, 'connectTimer')
+  clearTimer(sess, 'stableTimer')
+  clearTimer(sess, 'reconnectTimer')
 }
 
 // ============ BRIDGE SERVER (single, bound once per process) ============
@@ -110,11 +150,25 @@ function startBridgeServer() {
       })
     }
 
+    // GET /debug (dev/diagnostics: timer + handle leaks)
+    if (req.method === 'GET' && path === '/debug') {
+      let rssMB = 0
+      try { rssMB = Math.round(process.memoryUsage().rss / 1048576) } catch (e) {}
+      let handles = 0
+      try { handles = process._getActiveHandles().length } catch (e) {}
+      return json(200, {
+        ok: true,
+        handles,
+        rssMB,
+        sessions: [...sessions.values()].map(s => ({ id: s.serverId, phase: s.phase, attempt: s.attempt }))
+      })
+    }
+
     // GET /servers
     if (req.method === 'GET' && path === '/servers') {
       const list = []
       for (const sess of sessions.values()) {
-        list.push({ serverId: sess.serverId, active: sess.sessionActive, connected: !!sess.bot?.entity })
+        list.push({ serverId: sess.serverId, active: sess.sessionActive, connected: sess.phase === 'online', phase: sess.phase })
       }
       return json(200, { ok: true, servers: list })
     }
@@ -137,10 +191,10 @@ function startBridgeServer() {
         sessions.set(serverId, s)
         s.config = { ...s.config, ...(cmd || {}) }
         s.sessionActive = true
-        if (s.reconnectTimer) clearTimeout(s.reconnectTimer)
-        s.reconnectTimer = null
-        s.isConnecting = false
-        s.creating = false
+        clearAllTimers(s)
+        s.attempt = 0
+        s.reconnectAt = 0
+        s.lastError = null
         s.pendingMsaCode = null
         sessionLog(s, 'Session starting')
         createBot(s)
@@ -153,19 +207,19 @@ function startBridgeServer() {
     if (action === 'stop') {
       sess.sessionActive = false
       sess.pendingMsaCode = null
-      if (sess.reconnectTimer) clearTimeout(sess.reconnectTimer)
-      sess.reconnectTimer = null
-      sess.creating = false
-      sess.isConnecting = false
+      clearAllTimers(sess)
+      sess.attempt = 0
+      sess.reconnectAt = 0
+      sess.phase = 'idle'
       disposeBot(sess)
       return json(200, { ok: true, stopped: true, active: sessions.size })
     }
 
     if (action === 'reconnect') {
       if (!sess.sessionActive) return json(200, { ok: false })
-      if (sess.reconnectTimer) clearTimeout(sess.reconnectTimer)
-      sess.reconnectTimer = null
-      sess.isConnecting = false
+      sess.attempt = 0
+      clearAllTimers(sess)
+      sess.reconnectAt = 0
       createBot(sess)
       return json(200, { ok: true })
     }
@@ -204,12 +258,16 @@ function startBridgeServer() {
       const status = {
         ok: true,
         active: sess.sessionActive,
-        connected: !!sess.bot?.entity,
-        loggingIn: !!sess.bot && !sess.bot.entity,
+        phase: sess.phase,
+        connected: sess.phase === 'online',
+        loggingIn: sess.phase === 'connecting',
         username: sess.bot?.username,
         health: sess.bot?.health,
         food: sess.bot?.food,
-        position: sess.bot?.entity?.position
+        position: sess.bot?.entity?.position,
+        attempt: sess.attempt,
+        reconnectInMs: sess.phase === 'waiting' && sess.reconnectAt ? Math.max(0, sess.reconnectAt - Date.now()) : 0,
+        lastError: sess.lastError
       }
       if (sess.pendingMsaCode) {
         status.msa_code = {
@@ -242,38 +300,79 @@ function startBridgeServer() {
 }
 
 // ============ BOT ============
+// NOTE: never call removeAllListeners() here — that would remove mineflayer's
+// own internal `bot.on('end', cleanup)` (plugins/physics.js) and leak the
+// 50 ms physics setInterval plus the whole old bot on every Stop/reconnect.
+// Setting sess.bot = null FIRST makes every stale handler a no-op (they all
+// check `currentBot !== sess.bot`), then quit() + socket destroy ends it.
 function disposeBot(sess) {
-  if (sess.bot) {
-    try { sess.bot.removeAllListeners() } catch (e) {}
-    try { sess.bot.quit('Session closed') } catch (e) {}
-    sess.bot = null
-  }
+  const bot = sess.bot
+  sess.bot = null
+  if (!bot) return
+  try { bot.on('error', () => {}) } catch (e) {}
+  try { bot.quit('Session closed') } catch (e) {}
+  try { if (bot._client && bot._client.socket) bot._client.socket.destroy() } catch (e) {}
 }
 
-function scheduleReconnect(sess) {
-  if (!sess.sessionActive || sess.isConnecting) return
-  sess.isConnecting = true
-  if (sess.reconnectTimer) clearTimeout(sess.reconnectTimer)
-  const delay = sess.pendingMsaCode ? 20000 : 5000
-  sessionLog(sess, 'Reconnecting in ' + (delay / 1000) + 's...')
+// Single funnel for every down path (kicked / end / error / watchdog).
+// Idempotent: the first event wins, later ones (e.g. 'end' after 'kicked')
+// are ignored via bot.__down + the stale-bot guard.
+function handleDown(sess, bot, reason) {
+  if (!bot || bot !== sess.bot || bot.__down) return
+  bot.__down = true
+  const msg = String(reason || 'disconnected')
+  sess.lastError = msg
+  clearTimer(sess, 'connectTimer')
+  clearTimer(sess, 'stableTimer')
+  disposeBot(sess)
+  scheduleReconnect(sess, msg)
+}
+
+function scheduleReconnect(sess, reason) {
+  const r = String(reason || '')
+  // Permanent failures: never retry (manual /start still works).
+  if (/banned|not whitelisted|whitelist/i.test(r)) {
+    sessionLog(sess, 'Auto-reconnect stopped: ' + r)
+    sess.sessionActive = false
+    sess.phase = 'idle'
+    sess.reconnectAt = 0
+    return
+  }
+  if (!sess.sessionActive) { sess.phase = 'idle'; return }
+  clearTimer(sess, 'reconnectTimer')
+  sess.attempt = (sess.attempt || 0) + 1
+  let delay = Math.min(BACKOFF_BASE_MS * Math.pow(2, Math.min(sess.attempt - 1, 6)), BACKOFF_CAP_MS)
+  delay = delay * (1 + Math.random() * 0.2)
+  if (/throttl|too fast|wait before/i.test(r)) delay = Math.max(delay, 30000)
+  sess.phase = 'waiting'
+  sess.reconnectAt = Date.now() + Math.round(delay)
+  const secs = Math.round(delay / 1000)
+  sessionLog(sess, 'Reconnecting in ' + secs + 's (attempt ' + sess.attempt + ')')
+  // ALWAYS armed while the session is active — there is no flag that can
+  // silently swallow the retry (the old isConnecting/creating bug).
   sess.reconnectTimer = setTimeout(() => {
     sess.reconnectTimer = null
+    sess.reconnectAt = 0
     createBot(sess)
   }, delay)
 }
 
 function createBot(sess) {
-  if (!sess.sessionActive || sess.creating) return
-  sess.creating = true
-  sess.isConnecting = true
+  if (!sess.sessionActive) return
+  // Always start clean; no early-return flags (the old `creating` guard
+  // wedged the session whenever a failure happened before spawn).
   disposeBot(sess)
+  clearAllTimers(sess)
+  sess.phase = 'connecting'
 
   const opts = {
     host: sess.config.host,
     port: sess.config.port,
     username: sess.config.username,
     auth: sess.config.auth,
-    version: false
+    // Cached version skips the pre-login ping (that ping failure used to
+    // emit only 'error' with no 'end', hanging the client pre-spawn).
+    version: sess.version || false
   }
 
   const vd = parseInt(sess.config.viewDistance, 10)
@@ -297,6 +396,8 @@ function createBot(sess) {
         verificationUri: response.verification_uri || response.verificationUrl || 'https://www.microsoft.com/link',
         message: response.message
       }
+      // Pause the watchdog while the user completes the device-code flow.
+      clearTimer(sess, 'connectTimer')
     }
   }
 
@@ -309,10 +410,10 @@ function createBot(sess) {
   try {
     bot = mineflayer.createBot(opts)
   } catch (e) {
-    sess.creating = false
-    sess.isConnecting = false
-    sessionLog(sess, 'createBot failed: ' + e.message)
-    scheduleReconnect(sess)
+    const msg = (e && e.message) || String(e)
+    sessionLog(sess, 'createBot failed: ' + msg)
+    sess.lastError = msg
+    scheduleReconnect(sess, msg)
     return
   }
   sess.bot = bot
@@ -320,9 +421,26 @@ function createBot(sess) {
   // Capture reference to detect stale events after dispose/replace
   const currentBot = bot
 
+  // Connect watchdog: no spawn within the timeout -> treat as down.
+  // (Before spawn, some failures emit only 'error' and never 'end'.)
+  clearTimer(sess, 'connectTimer')
+  sess.connectTimer = setTimeout(() => {
+    sess.connectTimer = null
+    sessionLog(sess, 'Connect timeout (no spawn in ' + Math.round(CONNECT_TIMEOUT_MS / 1000) + 's)')
+    handleDown(sess, currentBot, 'connect timeout')
+  }, CONNECT_TIMEOUT_MS)
+
   currentBot.on('session', (sessInfo) => {
     if (currentBot !== sess.bot) return
     sessionLog(sess, 'Session attached: ' + (sessInfo && sessInfo.username || 'none'))
+    // MSA flow finished -> re-arm the watchdog if it was paused.
+    if (!sess.connectTimer && sess.phase === 'connecting') {
+      sess.connectTimer = setTimeout(() => {
+        sess.connectTimer = null
+        sessionLog(sess, 'Connect timeout (no spawn in ' + Math.round(CONNECT_TIMEOUT_MS / 1000) + 's)')
+        handleDown(sess, currentBot, 'connect timeout')
+      }, CONNECT_TIMEOUT_MS)
+    }
   })
 
   currentBot.on('login', (sessInfo) => {
@@ -333,9 +451,21 @@ function createBot(sess) {
   currentBot.once('spawn', () => {
     if (currentBot !== sess.bot) return
     sessionLog(sess, 'Bot spawned!')
-    sess.isConnecting = false
-    sess.creating = false
+    sess.phase = 'online'
+    sess.connectedSince = Date.now()
+    try { if (currentBot.version) sess.version = currentBot.version } catch (e) {}
     sess.pendingMsaCode = null
+    clearTimer(sess, 'connectTimer')
+    // attempt resets only after STABLE_MS of continuous uptime, NOT at spawn
+    // (spawn-then-instant-kick loops must keep backing off).
+    clearTimer(sess, 'stableTimer')
+    sess.stableTimer = setTimeout(() => {
+      sess.stableTimer = null
+      if (sess.phase === 'online' && currentBot === sess.bot) {
+        sess.attempt = 0
+        sessionLog(sess, 'Connection stable, retry counter reset')
+      }
+    }, STABLE_MS)
     if (sess.config.chatCommand) {
       const chatBot = currentBot
       setTimeout(() => {
@@ -365,27 +495,36 @@ function createBot(sess) {
 
   currentBot.on('kicked', (reason, loggedIn) => {
     if (currentBot !== sess.bot) return
-    sessionLog(sess, 'Kicked: ' + reason)
-    pushChat(sess, 'error', null, 'Kicked: ' + reason)
+    const text = reasonText(currentBot, reason)
+    sessionLog(sess, 'Kicked: ' + text)
+    pushChat(sess, 'error', null, 'Kicked: ' + text)
     sess.pendingMsaCode = null
-    scheduleReconnect(sess)
+    if (/outdated|incompatible/i.test(text)) sess.version = null
+    handleDown(sess, currentBot, text)
   })
 
   currentBot.on('end', (reason) => {
     if (currentBot !== sess.bot) return
-    sessionLog(sess, 'Ended: ' + reason)
-    pushChat(sess, 'info', null, 'Disconnected: ' + reason)
+    const text = String(reason || 'disconnected')
+    sessionLog(sess, 'Ended: ' + text)
+    pushChat(sess, 'info', null, 'Disconnected: ' + text)
     sess.pendingMsaCode = null
-    sess.creating = false
-    scheduleReconnect(sess)
+    handleDown(sess, currentBot, text)
   })
 
   currentBot.on('error', (err) => {
     if (currentBot !== sess.bot) return
-    sessionLog(sess, 'Error: ' + err.message)
-    pushChat(sess, 'error', null, 'Error: ' + err.message)
-    sess.creating = false
-    scheduleReconnect(sess)
+    const msg = (err && err.message) || String(err)
+    // After spawn, packet-parse errors are not fatal (and socket errors are
+    // always followed by 'end', which handles the retry). Before spawn an
+    // auto-version ping failure emits only 'error', so it IS the down path.
+    if (sess.phase === 'online') {
+      sessionLog(sess, 'Error (ignored, still online): ' + msg)
+      return
+    }
+    sessionLog(sess, 'Error: ' + msg)
+    pushChat(sess, 'error', null, 'Error: ' + msg)
+    handleDown(sess, currentBot, msg)
   })
 }
 
@@ -398,5 +537,9 @@ process.on('uncaughtException', (err) => {
 })
 
 // ============ STARTUP ============
-startBridgeServer()
-origLog('Java AFK Bot ready (single bridge on port ' + BRIDGE_PORT + ')')
+if (require.main === module) {
+  startBridgeServer()
+  origLog('Java AFK Bot ready v2.1 (single bridge on port ' + BRIDGE_PORT + ')')
+} else {
+  module.exports = { reasonText, sessions, newSession, scheduleReconnect, handleDown, createBot, disposeBot }
+}
