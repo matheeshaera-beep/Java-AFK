@@ -28,9 +28,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
@@ -55,11 +58,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
@@ -70,6 +74,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -120,6 +126,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -289,8 +297,9 @@ private fun DrawerContent(
         Text(
             "Java AFK",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 24.dp),
         )
+        Spacer(Modifier.height(16.dp))
 
         // Running count in front of the "Servers" header (fraction only).
         Row(
@@ -318,7 +327,14 @@ private fun DrawerContent(
         } else {
             servers.forEach { server ->
                 NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Dns, contentDescription = null) },
+                    icon = {
+                        ServerAvatar(
+                            host = server.host,
+                            port = server.port,
+                            name = server.name,
+                            size = 32.dp,
+                        )
+                    },
                     label = { Text(server.name) },
                     selected = false,
                     onClick = { onSelectServer(server.id) },
@@ -363,7 +379,9 @@ private fun DrawerContent(
             "Java AFK v${BuildConfig.VERSION_NAME}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 16.dp)
+                .windowInsetsPadding(WindowInsets.navigationBars),
         )
     }
 }
@@ -407,21 +425,47 @@ private fun ResourcesPanel(active: Boolean) {
             modifier = Modifier.padding(vertical = 8.dp),
         )
 
-        ListItem(
-            headlineContent = { Text("%.0f%%".format(smoothCpu)) },
-            supportingContent = { LinearProgressIndicator(progress = { cpuAnim }) },
-            leadingContent = { Icon(Icons.Default.Speed, contentDescription = null) },
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            modifier = Modifier.padding(vertical = 2.dp),
-        )
+        Column(Modifier.padding(vertical = 4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Default.Speed,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "CPU: %.0f%%".format(smoothCpu),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            LinearProgressIndicator(
+                progress = { cpuAnim },
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            )
+        }
 
-        ListItem(
-            headlineContent = { Text("$ram MB") },
-            supportingContent = { LinearProgressIndicator(progress = { ramAnim }) },
-            leadingContent = { Icon(Icons.Default.Memory, contentDescription = null) },
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            modifier = Modifier.padding(vertical = 2.dp),
-        )
+        Column(Modifier.padding(vertical = 4.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Default.Memory,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "RAM: $ram MB",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            LinearProgressIndicator(
+                progress = { ramAnim },
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            )
+        }
     }
 }
 
@@ -559,22 +603,7 @@ private fun ServerRow(
         AppGraph.noteServerName(server.id, server.name)
     }
     val state by session.state.collectAsState()
-    val cacheKey = "${server.host}:${server.port}"
-    var favicon by remember(cacheKey) {
-        mutableStateOf(faviconCache[cacheKey])
-    }
-
-    LaunchedEffect(cacheKey) {
-        if (faviconCache.containsKey(cacheKey)) {
-            favicon = faviconCache[cacheKey]
-        } else {
-            val bmp = withContext(Dispatchers.IO) {
-                ServerPinger.fetchFavicon(server.host, server.port)
-            }
-            if (bmp != null) cacheFavicon(cacheKey, bmp)
-            favicon = bmp
-        }
-    }
+    var showMenu by remember { mutableStateOf(false) }
 
     val isConnected = state == "connected"
     val isWorking = state == "connecting" || state == "authenticating" || state == "reconnecting"
@@ -596,59 +625,116 @@ private fun ServerRow(
             Modifier.fillMaxWidth().padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (favicon != null) {
-                Image(
-                    bitmap = favicon!!.asImageBitmap(),
-                    contentDescription = "Server icon",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(8.dp)),
-                )
-                Spacer(Modifier.width(10.dp))
-            } else {
-                Box(
-                    Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                    contentAlignment = Alignment.Center,
+            ServerAvatar(
+                host = server.host,
+                port = server.port,
+                name = server.name,
+                size = 48.dp,
+            )
+            Spacer(Modifier.width(10.dp))
+
+            Column(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(server.name, style = MaterialTheme.typography.titleMedium)
+                // Host with the status pill right next to it.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        server.name.take(1).uppercase(),
-                        style = MaterialTheme.typography.titleSmall,
+                        server.host,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(statusColor.copy(alpha = 0.15f))
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(statusLabel, style = MaterialTheme.typography.labelMedium, color = statusColor)
+                    }
+                }
+            }
+
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "Server options")
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Edit") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            onEdit()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            onDelete()
+                        },
                     )
                 }
-                Spacer(Modifier.width(10.dp))
             }
+        }
+    }
+}
 
-            Column(Modifier.weight(1f)) {
-                Text(server.name, style = MaterialTheme.typography.titleMedium)
-                // Host only — every server uses the same port, so it is noise.
-                // host/port stay in the entity for favicon, ping, connect.
-                Text(
-                    server.host,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+/** Server icon shared by the main list and the drawer: live favicon when the
+ *  server has one, initial-letter tile otherwise (memory-cached). */
+@Composable
+private fun ServerAvatar(host: String, port: Int, name: String, size: Dp) {
+    val cacheKey = "$host:$port"
+    var favicon by remember(cacheKey) {
+        mutableStateOf(faviconCache[cacheKey])
+    }
 
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(statusColor.copy(alpha = 0.15f))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(statusLabel, style = MaterialTheme.typography.labelMedium, color = statusColor)
+    LaunchedEffect(cacheKey) {
+        if (faviconCache.containsKey(cacheKey)) {
+            favicon = faviconCache[cacheKey]
+        } else {
+            val bmp = withContext(Dispatchers.IO) {
+                ServerPinger.fetchFavicon(host, port)
             }
+            if (bmp != null) cacheFavicon(cacheKey, bmp)
+            favicon = bmp
+        }
+    }
 
-            IconButton(onClick = onEdit) {
-                Icon(Icons.Default.Edit, contentDescription = "Edit")
-            }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete")
-            }
+    if (favicon != null) {
+        Image(
+            bitmap = favicon!!.asImageBitmap(),
+            contentDescription = "Server icon",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(8.dp)),
+        )
+    } else {
+        Box(
+            Modifier
+                .size(size)
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                name.take(1).uppercase(),
+                style = if (size >= 40.dp) MaterialTheme.typography.titleSmall else MaterialTheme.typography.labelLarge,
+            )
         }
     }
 }
