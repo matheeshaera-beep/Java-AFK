@@ -58,6 +58,9 @@ class ServerSession(private val context: Context, val serverId: Long) {
     private var dataBaselineBytes = 0L
     private var connectedAtMs = 0L
     private var accumulatedMs = 0L
+    // Per-bot byte total from the bridge (socket counters). TrafficStats is
+    // per-UID, so it shows the same whole-app total on every server.
+    private var bridgeDataBytes = -1L
 
     /** All state transitions go through here for connected-time accounting. */
     private fun setState(s: String) {
@@ -79,7 +82,8 @@ class ServerSession(private val context: Context, val serverId: Long) {
             if (_state.value == "connected" && connectedAtMs > 0) now - connectedAtMs else 0
         _afkSeconds.value = (accumulatedMs + extra) / 1000
         _sessionDataBytes.value =
-            (uidBytes() - dataBaselineBytes).coerceAtLeast(0L)
+            if (bridgeDataBytes >= 0) bridgeDataBytes
+            else (uidBytes() - dataBaselineBytes).coerceAtLeast(0L)
     }
 
     private fun uidBytes(): Long {
@@ -154,6 +158,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 // Baseline for this session's data-usage counter.
                 dataBaselineBytes = uidBytes()
                 _sessionDataBytes.value = 0
+                bridgeDataBytes = -1
                 // Fresh run: time restarts here (and on Stop). Drops and
                 // reconnects in between keep accumulating instead.
                 accumulatedMs = 0
@@ -202,6 +207,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 connectedAtMs = 0
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
+                bridgeDataBytes = -1
                 pushLog("Stopped")
             }
         }
@@ -274,6 +280,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 connectedAtMs = 0
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
+                bridgeDataBytes = -1
             }
         }
     }
@@ -374,6 +381,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
     }
 
     private fun handleStatus(status: JSONObject) {
+        if (status.has("dataBytes")) bridgeDataBytes = status.optLong("dataBytes", -1)
         if (status.optBoolean("active", false)) {
             when {
                 status.optString("phase") == "waiting" -> {

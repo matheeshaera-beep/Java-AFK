@@ -13,7 +13,7 @@ const MAX_BOTS = 5 // hard limit: max 5 concurrent servers/bots
 const MAX_CHAT = 500 // ring buffer of chat messages per server
 const MAX_LOGS = 500 // ring buffer of log lines per server
 const MAX_SAVE_CHAR = 0 // placeholder to keep fs usage intentional
-const BOT_VERSION = '2.2'
+const BOT_VERSION = '2.3'
 
 // Timing (overridable by env for tests).
 const CONNECT_TIMEOUT_MS = parseInt(process.env.AFK_CONNECT_TIMEOUT_MS || '60000', 10)
@@ -65,7 +65,15 @@ function newSession(serverId) {
     logBuffer: [], // entries: {seq, text}; seq from logSeq, monotonic per session
     logSeq: 0,
     chatBuffer: [],
-    chatSeq: 0
+    chatSeq: 0,
+    // Per-session traffic accounting (socket byte counters; see netBytes).
+    // TrafficStats on Android is per-UID, so every session would otherwise
+    // show the same whole-app total.
+    netSock: null,
+    netBaseRx: 0,
+    netBaseTx: 0,
+    netAccRx: 0,
+    netAccTx: 0
   }
 }
 
@@ -197,6 +205,7 @@ function startBridgeServer() {
         s.reconnectAt = 0
         s.lastError = null
         s.pendingMsaCode = null
+        resetNet(s)
         sessionLog(s, 'Session starting')
         createBot(s)
         return json(200, { ok: true, started: true, active: sessions.size })
@@ -212,6 +221,7 @@ function startBridgeServer() {
       sess.attempt = 0
       sess.reconnectAt = 0
       sess.phase = 'idle'
+      resetNet(sess)
       disposeBot(sess)
       return json(200, { ok: true, stopped: true, active: sessions.size })
     }
@@ -297,6 +307,43 @@ function startBridgeServer() {
 }
 
 // ============ BOT ============
+// Per-bot traffic: the socket's cumulative byte counters, folded into the
+// session accumulator every time the socket is replaced (reconnect) so the
+// total survives drops and only resets on Stop/Start.
+function netBytes(sess) {
+  let sock = null
+  try { sock = sess.bot && sess.bot._client && sess.bot._client.socket } catch (e) {}
+  if (sock !== sess.netSock) {
+    if (sess.netSock) {
+      try {
+        sess.netAccRx += Math.max(0, sess.netSock.bytesRead - sess.netBaseRx)
+        sess.netAccTx += Math.max(0, sess.netSock.bytesWritten - sess.netBaseTx)
+      } catch (e) {}
+    }
+    sess.netSock = sock || null
+    // Base zero: a newly adopted socket's bytesRead IS its connection total,
+    // so the first observation already includes everything so far.
+    sess.netBaseRx = 0
+    sess.netBaseTx = 0
+  }
+  let rx = sess.netAccRx || 0
+  let tx = sess.netAccTx || 0
+  if (sock) {
+    try {
+      rx += Math.max(0, sock.bytesRead - sess.netBaseRx)
+      tx += Math.max(0, sock.bytesWritten - sess.netBaseTx)
+    } catch (e) {}
+  }
+  return rx + tx
+}
+
+function resetNet(sess) {
+  sess.netSock = null
+  sess.netBaseRx = 0
+  sess.netBaseTx = 0
+  sess.netAccRx = 0
+  sess.netAccTx = 0
+}
 // Shared shape for /status and the merged /poll (single source of truth).
 function statusOf(sess) {
   const status = {
@@ -311,7 +358,8 @@ function statusOf(sess) {
     position: sess.bot?.entity?.position,
     attempt: sess.attempt,
     reconnectInMs: sess.phase === 'waiting' && sess.reconnectAt ? Math.max(0, sess.reconnectAt - Date.now()) : 0,
-    lastError: sess.lastError
+    lastError: sess.lastError,
+    dataBytes: netBytes(sess)
   }
   if (sess.pendingMsaCode) {
     status.msa_code = {
