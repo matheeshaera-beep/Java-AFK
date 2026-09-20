@@ -32,7 +32,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
@@ -119,6 +118,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -973,6 +973,7 @@ private fun SessionScreen(
     val activeCount by AppGraph.activeCount.collectAsState(initial = 0)
     var kickedCount by remember { mutableIntStateOf(0) }
     var chatInput by remember { mutableStateOf("") }
+    var chatInputFocused by remember { mutableStateOf(false) }
     var showChat by remember { mutableStateOf(false) }
     var showSettings by remember(serverId) { mutableStateOf(false) }
     // Session-owned counters: keep ticking while connected even when this
@@ -1037,17 +1038,9 @@ private fun SessionScreen(
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (server == null) {
-                Text("Select a server from the list first.")
-                return@Column
-            }
-
+        if (server == null) {
+            Text("Select a server from the list first.")
+        } else {
             val srv = server!!
 
             LaunchedEffect(srv.id, srv.name) {
@@ -1058,6 +1051,17 @@ private fun SessionScreen(
                 if (state == "connected") MaterialTheme.colorScheme.primary
                 else if (state == "connecting" || state == "authenticating" || state == "reconnecting") MaterialTheme.colorScheme.tertiary
                 else MaterialTheme.colorScheme.onSurfaceVariant
+            // Header/controls scroll only while typing (bounded share, so the
+            // shrunken window can't push the input off-screen). Otherwise the
+            // region wraps its content: a bounded verticalScroll would fill
+            // the whole share and leave a dead gap under short headers.
+            Column(
+                Modifier
+                    .then(if (chatInputFocused) Modifier.weight(1f, fill = false) else Modifier)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
             Card(Modifier.fillMaxWidth().animateContentSize()) {
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -1203,6 +1207,7 @@ private fun SessionScreen(
                     Text(" Stop")
                 }
             }
+            }
         }
 
         server?.let { srvd ->
@@ -1238,8 +1243,11 @@ private fun SessionScreen(
                 }
             }
 
-            Card(Modifier.fillMaxWidth().weight(1f).heightIn(min = 200.dp)) {
-                Column(Modifier.fillMaxSize().padding(12.dp).imePadding()) {
+            Card(
+                Modifier.fillMaxWidth().weight(1f)
+                    .heightIn(min = if (chatInputFocused) 0.dp else 200.dp),
+            ) {
+                Column(Modifier.fillMaxSize().padding(12.dp)) {
                     Box(Modifier.fillMaxWidth().weight(1f)) {
                         LazyColumn(
                             Modifier.fillMaxSize(),
@@ -1292,7 +1300,8 @@ private fun SessionScreen(
                             OutlinedTextField(
                                 value = chatInput,
                                 onValueChange = { chatInput = it },
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier.weight(1f)
+                                    .onFocusChanged { chatInputFocused = it.isFocused },
                                 label = { Text("Type a message or /command") },
                                 singleLine = true,
                             )
@@ -1326,6 +1335,31 @@ private fun SessionScreen(
     }
     if (openWindow != null && !windowDismissed) {
         val w = openWindow!!
+        // Filler-dedup: slots repeating the same name+count more than twice
+        // collapse into one row ("+N more"); distinct items come first in
+        // slot order. Tapping a collapsed row clicks its first slot.
+        // Keyed on title so the toggle survives the 1 Hz re-polls.
+        var showAllSlots by remember(w.title) { mutableStateOf(false) }
+        val rows = remember(w.title, w.slots, showAllSlots) {
+            if (showAllSlots) {
+                w.slots.map { SlotRow(it.slot, it.name, it.count, 0) }
+            } else {
+                val groups = w.slots.groupBy { it.name to it.count }
+                val out = mutableListOf<SlotRow>()
+                w.slots
+                    .filter { s -> groups[s.name to s.count]!!.size <= 2 }
+                    .mapTo(out) { SlotRow(it.slot, it.name, it.count, 0) }
+                groups.values
+                    .filter { it.size > 2 }
+                    .sortedBy { g -> g.minOf { it.slot } }
+                    .mapTo(out) { g ->
+                        val first = g.minBy { it.slot }
+                        SlotRow(first.slot, first.name, first.count, g.size - 1)
+                    }
+                out
+            }
+        }
+        val collapsedCount = rows.sumOf { it.more }
         ModalBottomSheet(
             onDismissRequest = {
                 windowDismissed = true
@@ -1333,13 +1367,23 @@ private fun SessionScreen(
             },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            Text(
-                w.title,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    w.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (collapsedCount > 0 && !showAllSlots) {
+                    TextButton(onClick = { showAllSlots = true }) { Text("Show all") }
+                } else if (showAllSlots) {
+                    TextButton(onClick = { showAllSlots = false }) { Text("Show less") }
+                }
+            }
             LazyColumn {
-                items(w.slots, key = { it.slot }) { s ->
+                items(rows, key = { it.slot }) { s ->
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -1354,7 +1398,10 @@ private fun SessionScreen(
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            "×${s.count}",
+                            buildString {
+                                append("×${s.count}")
+                                if (s.more > 0) append("  +${s.more} more")
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1396,8 +1443,10 @@ private fun SessionScreen(
     }
 }
 
-private fun formatAfkTime(totalSeconds: Long): String {
-    val h = totalSeconds / 3600
+/** One bottom-sheet row: a window slot plus collapsed duplicates (more). */
+private data class SlotRow(val slot: Int, val name: String, val count: Int, val more: Int)
+
+private fun formatAfkTime(totalSeconds: Long): String {    val h = totalSeconds / 3600
     val m = (totalSeconds % 3600) / 60
     val s = totalSeconds % 60
     return "%02d:%02d:%02d".format(h, m, s)

@@ -1,4 +1,4 @@
-# Java AFK v2.2
+# Java AFK v2.3
 
 Android app that keeps your Minecraft **Java Edition** account online (AFK) on any
 server — backed by [mineflayer](https://github.com/PrismarineJS/mineflayer)
@@ -24,7 +24,7 @@ for headless/CLI use.
 ## How to use
 
 1. Install the APK from the
-   [v2.2 release](https://github.com/matheeshaera-beep/Java-AFK/releases/tag/v2.2).
+   [v2.3 release](https://github.com/matheeshaera-beep/Java-AFK/releases/tag/v2.3).
 2. Open the app, tap **+**, enter a server (e.g. Name `Donut SMP`,
    Host `donutsmp.net`, Port `25565`).
 3. Open the server, tap **Start**.

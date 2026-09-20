@@ -318,7 +318,8 @@ function startBridgeServer() {
       return json(200, { ok: true })
     }
 
-    if (action === 'window' && sub === 'click' && req.method === 'POST') {      return readBody(cmd => {
+    if (action === 'window' && sub === 'click' && req.method === 'POST') {
+      return readBody(cmd => {
         if (typeof cmd === 'string') return json(400, { ok: false, error: cmd })
         const slot = cmd.slot
         if (typeof slot !== 'number' || slot < 0) return json(400, { ok: false, error: 'slot must be a number' })

@@ -290,7 +290,8 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
-    fun clearToken() {        scope.launch {
+    fun clearToken() {
+        scope.launch {
             val authDir = File(context.filesDir, "minecraft-auth")
             if (authDir.exists()) authDir.deleteRecursively()
             val tokenFile = File(context.filesDir, "ms_token.json")
