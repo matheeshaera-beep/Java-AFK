@@ -231,8 +231,25 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
-    fun clearToken() {
+    /** Pushes live settings to a running bot (chat visibility, command,
+     *  delays, view distance). Without this, edits made while connected sit
+     *  in the database until the next Stop/Start. Quiet: a down bridge just
+     *  means the next Start carries the full config anyway. */
+    fun pushLiveConfig(chatCommand: String, delaySeconds: Int, viewDistance: Int, chatMode: String) {
         scope.launch {
+            post(
+                "config",
+                JSONObject()
+                    .put("chatCommand", chatCommand)
+                    .put("commandDelaySeconds", delaySeconds)
+                    .put("viewDistance", viewDistance)
+                    .put("chatMode", chatMode),
+                quiet = true,
+            )
+        }
+    }
+
+    fun clearToken() {        scope.launch {
             val authDir = File(context.filesDir, "minecraft-auth")
             if (authDir.exists()) authDir.deleteRecursively()
             val tokenFile = File(context.filesDir, "ms_token.json")

@@ -354,7 +354,7 @@ private fun DrawerContent(
         )
 
         Text(
-            "Java AFK v1.0",
+            "Java AFK v${BuildConfig.VERSION_NAME}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
@@ -761,6 +761,7 @@ private fun ServerSettingsDialog(
         if (chatCommandText != server.chatCommand) {
             delay(600)
             dao.update(server.copy(chatCommand = chatCommandText))
+            session.pushLiveConfig(chatCommandText, delayText.toIntOrNull() ?: server.commandDelaySeconds, viewDistanceText.toIntOrNull() ?: server.viewDistance, chatModeValue)
         }
     }
     LaunchedEffect(delayText) {
@@ -768,6 +769,7 @@ private fun ServerSettingsDialog(
         if (parsed != null && parsed != server.commandDelaySeconds) {
             delay(600)
             dao.update(server.copy(commandDelaySeconds = parsed))
+            session.pushLiveConfig(chatCommandText, parsed, viewDistanceText.toIntOrNull() ?: server.viewDistance, chatModeValue)
         }
     }
     LaunchedEffect(viewDistanceText) {
@@ -775,12 +777,14 @@ private fun ServerSettingsDialog(
         if (parsed != null && parsed != server.viewDistance) {
             delay(600)
             dao.update(server.copy(viewDistance = parsed))
+            session.pushLiveConfig(chatCommandText, delayText.toIntOrNull() ?: server.commandDelaySeconds, parsed, chatModeValue)
         }
     }
     LaunchedEffect(chatModeValue) {
         if (chatModeValue != server.chatMode) {
             delay(600)
             dao.update(server.copy(chatMode = chatModeValue))
+            session.pushLiveConfig(chatCommandText, delayText.toIntOrNull() ?: server.commandDelaySeconds, viewDistanceText.toIntOrNull() ?: server.viewDistance, chatModeValue)
         }
     }
     AlertDialog(
