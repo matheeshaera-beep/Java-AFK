@@ -551,7 +551,7 @@ private fun ServerRow(
     }
 
     val isConnected = state == "connected"
-    val isWorking = state == "connecting" || state == "authenticating"
+    val isWorking = state == "connecting" || state == "authenticating" || state == "reconnecting"
     val statusLabel = when {
         isConnected -> "Connected"
         isWorking -> state.replaceFirstChar { it.uppercase() }
@@ -982,10 +982,10 @@ private fun SessionScreen(
                 }
                 OutlinedButton(
                     onClick = { session.reconnect() },
-                    enabled = state == "connected" || state == "error",
+                    enabled = state != "disconnected",
                 ) {
                     Icon(Icons.Default.Refresh, contentDescription = null)
-                    Text(" Reconnect")
+                    Text(" Reconnect now")
                 }
             }
 
@@ -1152,6 +1152,7 @@ private fun formatAfkTime(totalSeconds: Long): String {
 private fun stateLabel(state: String): String = when (state) {
     "connected" -> "Connected"
     "connecting" -> "Connecting"
+    "reconnecting" -> "Reconnecting"
     "authenticating" -> "Authenticating"
     "error" -> "Error"
     else -> "Disconnected"

@@ -32,7 +32,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Maintains a headless Minecraft Bedrock network connection for AFK presence" />
+                android:value="Maintains a headless Minecraft Java Edition network connection for AFK presence" />
         </service>
     </application>
 

@@ -1,4 +1,4 @@
-# Java AFK
+# Java AFK v2.1
 
 Android app that keeps your Minecraft **Java Edition** account online (AFK) on any
 server — backed by [mineflayer](https://github.com/PrismarineJS/mineflayer)
@@ -16,7 +16,7 @@ for headless/CLI use.
   logging in → connected, with an "Online as X · auth · host:port" summary.
 - **Live logs + chat** — bridge log stream, per-server chat send/receive.
 - **AFK timer + data usage** — per-server counters that reset on Stop.
-- **Health + hunger** logged every 10 s while connected.
+- **Health + hunger** logged when they change (5-minute heartbeat otherwise).
 - **Foreground service** — persistent notification shows the running server(s)
   with a force-stop action; per-server wake lock.
 - **Resource monitor** — CPU / RAM drawer panel, dark mode.
@@ -24,7 +24,7 @@ for headless/CLI use.
 ## How to use
 
 1. Install the APK from the
-   [v2.0 release](https://github.com/matheeshaera-beep/java-afk-app/releases/tag/v2.0).
+   [v2.1 release](https://github.com/matheeshaera-beep/java-afk-app/releases/tag/v2.1).
 2. Open the app, tap **+**, enter a server (e.g. Name `Donut SMP`,
    Host `donutsmp.net`, Port `25565`).
 3. Open the server, tap **Start**.
@@ -39,10 +39,22 @@ for headless/CLI use.
 Tips:
 
 - The log tab shows everything the bridge reports (connect, auth, kicks,
-  errors, reconnects).
+  errors, reconnects). It follows the newest lines; scroll up to pause and
+  tap **Jump to latest** to resume.
+- Reconnect behavior: any drop (kick, network error, timeout) retries with
+  exponential backoff (5 s → 5 min cap, ≥30 s after throttling). The counter
+  resets after 60 s of stable uptime. Bans / whitelist rejections stop
+  auto-retry (start manually if that changes). The session screen shows
+  **Reconnecting** with the next attempt and the last error.
+- View distance defaults to **2** — enough for AFK and far cheaper on
+  battery, RAM and mobile data. (Farm output depends on the server's
+  simulation-distance, not this setting.) Raise it in ⚙ settings only if
+  you need more chunks.
 - If Microsoft asks again later, use **Clear token** in the server settings
   and Start again.
 - Two servers can run at the same time; a third Start is refused with a message.
+- Stopping the last server releases the wake lock and stops the service, so
+  the phone sleeps normally with zero bots.
 
 ## Supported devices
 

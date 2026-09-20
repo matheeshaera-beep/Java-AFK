@@ -354,6 +354,16 @@ class ServerSession(private val context: Context, val serverId: Long) {
     private fun handleStatus(status: JSONObject) {
         if (status.optBoolean("active", false)) {
             when {
+                status.optString("phase") == "waiting" -> {
+                    // Online -> waiting means a kick/drop happened since the
+                    // last poll: count it so the UI snackbar fires.
+                    if (_state.value == "connected") kickedCount++
+                    setState("reconnecting")
+                    val secs = (status.optLong("reconnectInMs", 0) + 999) / 1000
+                    val err = status.optString("lastError").ifBlank { "disconnected" }
+                    _detail.value =
+                        "Reconnecting in ${secs}s (attempt ${status.optInt("attempt", 0)}) — $err"
+                }
                 status.optBoolean("connected") -> {
                     setState("connected")
                     _detail.value = buildString {
