@@ -248,6 +248,9 @@ function startBridgeServer() {
             const isCommand = msg.startsWith('/')
             if (isCommand || sess.config.chatMode !== 'commandsOnly') {
               sess.bot.chat(msg)
+              // Echo only after a successful send (no invented seq — the
+              // bridge cursor advances here, Kotlin only follows it).
+              pushChat(sess, 'out', null, '> ' + msg)
             }
           } catch (e) { sessionLog(sess, 'chat error: ' + e.message) }
         }
@@ -480,19 +483,52 @@ function createBot(sess) {
 
   // Chat capture — uses messages mineflayer already receives over the Minecraft
   // connection. No extra packets, no external requests.
-  const CHAT_MAP = { 'chat': 'chat', 'system': 'system', 'game_info': 'info' }
+  const CHAT_MAP = { 'chat': 'chat', 'system': 'system' }
   currentBot.on('message', (msg, position, sender, verified) => {
     if (currentBot !== sess.bot) return
+    // Action-bar traffic (position 'game_info', constant on servers like Donut
+    // SMP) would flood the buffer and push real chat out — never store it.
+    if (position === 'game_info') return
     const type = CHAT_MAP[position] || (position === 'whisper' ? 'whisper' : 'info')
     // "Hidden" filters normal public chat locally too (system/whisper/error stay).
     if (type === 'chat' && sess.config.chatMode === 'hidden') return
-    let senderName = sender
-    if (sender && typeof sender === 'string') {
-      try { const s = JSON.parse(sender); senderName = s.name || sender } catch (e) {}
+    let senderName = null
+    if (typeof sender === 'string') {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(sender)) {
+        senderName = null // UUID string; the text already contains <Name>
+      } else {
+        try { const s = JSON.parse(sender); senderName = s.name || sender } catch (e) { senderName = sender }
+      }
     } else if (sender && typeof sender === 'object') {
       senderName = sender.name || null
     }
     pushChat(sess, type, senderName, String(msg))
+  })
+
+  // mineflayer 4.39 has no explicit `profileless_chat` listener (1.19.3+:
+  // /say, /msg, some plugins) — best-effort fallback straight off the
+  // protocol client. minecraft-protocol ALSO translates profileless into a
+  // 'playerChat' event, which mineflayer usually turns into a 'message' for
+  // the same packet — but that translation listener runs AFTER this one, so
+  // the dupe check is deferred 300 ms: if anything appended since the packet
+  // arrived already contains the content, the fallback stays silent and /say
+  // appears exactly once.
+  currentBot._client.on('profileless_chat', (pkt) => {
+    if (currentBot !== sess.bot) return
+    const botAtSend = currentBot
+    const baseline = sess.chatBuffer.length
+    setTimeout(() => {
+      if (botAtSend !== sess.bot) return
+      try {
+        const CM = require('prismarine-chat')(botAtSend.registry)
+        const t = CM.fromNotch(pkt.message).toString()
+        const n = pkt.name ? CM.fromNotch(pkt.name).toString() : null
+        const line = n ? '<' + n + '> ' + t : t
+        const now = Date.now()
+        const dup = sess.chatBuffer.slice(baseline).some(e => (now - e.ts) < 2000 && e.text.includes(t))
+        if (!dup) pushChat(sess, 'chat', null, line)
+      } catch (e) { sessionLog(sess, 'profileless_chat: ' + e.message) }
+    }, 300)
   })
 
   currentBot.on('kicked', (reason, loggedIn) => {

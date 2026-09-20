@@ -192,9 +192,15 @@ class ServerSession(private val context: Context, val serverId: Long) {
     fun sendChat(message: String) {
         if (message.isBlank()) return
         scope.launch {
+            // No local echo, no invented seq: the bridge appends an 'out'
+            // line after a successful send and the cursor follows bridge
+            // seqs only — echoing locally used to skip server messages.
             post("chat", JSONObject().put("message", message.trim()))
-            val prev = _chat.value
-            _chat.value = (prev + ChatLine(++lastChatSeq, System.currentTimeMillis(), "chat", null, "> $message".trim())).takeLast(500)
+            try {
+                pullChat(true)
+            } catch (e: Exception) {
+                android.util.Log.w("ServerSession", "sendChat pull failed: ${e.message}")
+            }
         }
     }
 
@@ -355,13 +361,18 @@ class ServerSession(private val context: Context, val serverId: Long) {
             _state.value = "disconnected"
             _detail.value = ""
         }
-        // Chat is pulled only while the chat tab is open (chatPollingEnabled).
-        if (chatPollingEnabled.get()) pullChat(status.optBoolean("connected"))
+        // Chat is pulled in the same loop as status and logs, even while the
+        // chat tab is closed — otherwise the ring buffer rotates real chat
+        // out before the user ever opens the tab.
+        pullChat(status.optBoolean("connected"))
     }
 
     /** Fetch any missed chat once (called when the chat tab opens). */
     fun refreshChatNow() {
-        pullChat(true)
+        // Blocking network call — must run off the main thread (it used to
+        // throw NetworkOnMainThreadException from a LaunchedEffect, silently
+        // swallowed by an empty catch).
+        scope.launch { pullChat(true) }
     }
 
     private fun pullChat(connected: Boolean) {
@@ -385,6 +396,8 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     )
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.w("ServerSession", "pullChat failed: ${e.message}")
+        }
     }
 }
