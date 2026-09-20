@@ -125,7 +125,13 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -917,17 +923,24 @@ private fun ServerSettingsDialog(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     )
                 }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text("Public chat", style = MaterialTheme.typography.bodyLarge)
-                    Row {
-                        ChatModeChip("Enabled", "enabled", chatModeValue) { chatModeValue = "enabled" }
-                        ChatModeChip("Commands only", "commandsOnly", chatModeValue) { chatModeValue = "commandsOnly" }
-                        ChatModeChip("Hidden", "hidden", chatModeValue) { chatModeValue = "hidden" }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("Public chat", style = MaterialTheme.typography.bodyLarge)
+                        Row {
+                            ChatModeChip("Enabled", "enabled", chatModeValue) { chatModeValue = "enabled" }
+                            ChatModeChip("Commands only", "commandsOnly", chatModeValue) { chatModeValue = "commandsOnly" }
+                            ChatModeChip("Hidden", "hidden", chatModeValue) { chatModeValue = "hidden" }
+                        }
                     }
+                    Text(
+                        "Which incoming chat the server sends you. Your Send button always works.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 OutlinedTextField(
                     value = chatCommandText,
@@ -986,6 +999,26 @@ private fun SessionScreen(
     val sessionData by session.sessionDataBytes.collectAsState()
     val scope = rememberCoroutineScope()
     val canStart = state == "disconnected" || state == "error"
+
+    // Single send path for the keyboard Send key and the arrow button:
+    // trim, ignore blank, clear after sending, keep focus/keyboard open.
+    // Never fails silently: while Disconnected both show "Not connected".
+    val chatFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    fun sendChatMessage() {
+        val msg = chatInput.trim()
+        if (msg.isBlank()) return
+        if (state != "connected") {
+            scope.launch { snackbarHostState.showSnackbar("Not connected") }
+            return
+        }
+        session.sendChat(msg) { err ->
+            scope.launch { snackbarHostState.showSnackbar(err) }
+        }
+        chatInput = ""
+        chatFocusRequester.requestFocus()
+        keyboardController?.show()
+    }
 
     // Follow-newest log/chat: sticks to the tail on new lines, releases when
     // the user scrolls up, re-engages at the bottom or via the jump button.
@@ -1271,7 +1304,9 @@ private fun SessionScreen(
                         ) {
                             if (showChat) {
                                 items(chat, key = { "${it.seq}:${it.ts}:${it.text.hashCode()}" }) { line ->
-                                    val sender = line.sender?.let { "<$it> " } ?: ""
+                                    // Belt and suspenders with cleanSender():
+                                    // a system line must never render "<null>".
+                                    val sender = line.sender?.takeIf { it != "null" }?.let { "<$it> " } ?: ""
                                     val color = when (line.type) {
                                         "chat" -> MaterialTheme.colorScheme.onSurface
                                         "system" -> MaterialTheme.colorScheme.tertiary
@@ -1316,21 +1351,19 @@ private fun SessionScreen(
                             OutlinedTextField(
                                 value = chatInput,
                                 onValueChange = { chatInput = it },
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier.weight(1f).focusRequester(chatFocusRequester),
                                 label = { Text("Type a message or /command") },
                                 minLines = 1,
                                 maxLines = 5,
+                                keyboardOptions = KeyboardOptions(
+                                    imeAction = ImeAction.Send,
+                                    capitalization = KeyboardCapitalization.Sentences,
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onSend = { sendChatMessage() },
+                                ),
                             )
-                            IconButton(
-                                onClick = {
-                                    val msg = chatInput
-                                    if (msg.isNotBlank()) {
-                                        session.sendChat(msg)
-                                        chatInput = ""
-                                    }
-                                },
-                                enabled = state == "connected",
-                            ) {
+                            IconButton(onClick = { sendChatMessage() }) {
                                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                             }
                         }

@@ -242,13 +242,21 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
-    fun sendChat(message: String) {
+    fun sendChat(message: String, onError: (String) -> Unit = {}) {
         if (message.isBlank()) return
         scope.launch {
             // No local echo, no invented seq: the bridge appends an 'out'
             // line after a successful send and the cursor follows bridge
             // seqs only — echoing locally used to skip server messages.
-            post("chat", JSONObject().put("message", message.trim()))
+            val res = post("chat", JSONObject().put("message", message.trim()))
+            if (res == null) {
+                onError("Not connected")
+                return@launch
+            }
+            if (!res.optBoolean("ok", false)) {
+                onError(res.optString("error").ifBlank { "Not connected" })
+                return@launch
+            }
             try {
                 pullChat(true)
             } catch (e: Exception) {
@@ -390,6 +398,13 @@ class ServerSession(private val context: Context, val serverId: Long) {
     private var lastLoggedHearts = Double.NaN
     private var lastLoggedFood = -1
 
+    /** Bridge chat entries carry sender:null as JSON null, which
+     *  JSONObject.optString() reads back as the literal string "null".
+     *  Map both that and blank to a real null so the UI never renders
+     *  "<null>". */
+    private fun cleanSender(raw: String?): String? =
+        raw?.takeIf { it.isNotBlank() && it != "null" }
+
     /** ONE bridge request per cycle: status + new logs + new chat (replaces
      *  the old 2-request status+logs loop plus the tab-gated chat pull). */
     private fun pollMerged() {
@@ -410,7 +425,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     m.optInt("seq"),
                     m.optLong("ts"),
                     m.optString("type", "chat"),
-                    m.optString("sender").ifBlank { null },
+                    cleanSender(m.optString("sender")),
                     m.optString("text"),
                 )
             }
@@ -539,7 +554,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                         m.optInt("seq"),
                         m.optLong("ts"),
                         m.optString("type", "chat"),
-                        m.optString("sender").ifBlank { null },
+                        cleanSender(m.optString("sender")),
                         m.optString("text"),
                     )
                 }

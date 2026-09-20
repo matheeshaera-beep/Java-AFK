@@ -254,17 +254,24 @@ function startBridgeServer() {
     if (action === 'chat' && req.method === 'POST') {
       return readBody(cmd => {
         if (typeof cmd === 'string') return json(400, { ok: false, error: cmd })
-        if (cmd.message && sess.bot?.entity) {
-          try {
-            const msg = String(cmd.message)
-            const isCommand = msg.startsWith('/')
-            if (isCommand || sess.config.chatMode !== 'commandsOnly') {
-              sess.bot.chat(msg)
-              // Echo only after a successful send (no invented seq — the
-              // bridge cursor advances here, Kotlin only follows it).
-              pushChat(sess, 'out', null, '> ' + msg)
-            }
-          } catch (e) { sessionLog(sess, 'chat error: ' + e.message) }
+        const msg = cmd.message != null ? String(cmd.message) : ''
+        if (!msg.trim()) return json(200, { ok: false, error: 'empty message' })
+        // No silent drops: tell the UI when there is no bot to send with
+        // (e.g. Disconnected) instead of answering ok:true and doing nothing.
+        if (!sess.bot?.entity) return json(200, { ok: false, error: 'Not connected' })
+        try {
+          // An explicit tap on Send always goes through — even for plain
+          // chat while chatMode is 'commandsOnly'. chatMode only governs
+          // which public chat the server forwards to us (incoming), never
+          // what the user deliberately sends. bot.chat() handles a leading
+          // '/' itself (sent whole, not split).
+          sess.bot.chat(msg)
+          // Echo only after a successful send (no invented seq — the
+          // bridge cursor advances here, Kotlin only follows it).
+          pushChat(sess, 'out', 'You', msg)
+        } catch (e) {
+          sessionLog(sess, 'chat error: ' + e.message)
+          return json(200, { ok: false, error: e.message })
         }
         return json(200, { ok: true })
       })
@@ -680,7 +687,9 @@ function createBot(sess) {
     if (currentBot !== sess.bot) return
     const text = reasonText(currentBot, reason)
     sessionLog(sess, 'Kicked: ' + text)
-    pushChat(sess, 'error', null, 'Kicked: ' + text)
+    // Session notice, not an error dump: stays visible as a clearly-labeled
+    // system line. (Bot 'error' events below stay in the Log tab only.)
+    pushChat(sess, 'info', null, 'Kicked: ' + text)
     sess.pendingMsaCode = null
     if (/outdated|incompatible/i.test(text)) sess.version = null
     handleDown(sess, currentBot, text)
@@ -701,12 +710,13 @@ function createBot(sess) {
     // After spawn, packet-parse errors are not fatal (and socket errors are
     // always followed by 'end', which handles the retry). Before spawn an
     // auto-version ping failure emits only 'error', so it IS the down path.
+    // Either way the error lives in the Log tab only — never pushed as a
+    // chat line (that rendered as "<null> Error: ..." in the Chat tab).
     if (sess.phase === 'online') {
       sessionLog(sess, 'Error (ignored, still online): ' + msg)
       return
     }
     sessionLog(sess, 'Error: ' + msg)
-    pushChat(sess, 'error', null, 'Error: ' + msg)
     handleDown(sess, currentBot, msg)
   })
 }
