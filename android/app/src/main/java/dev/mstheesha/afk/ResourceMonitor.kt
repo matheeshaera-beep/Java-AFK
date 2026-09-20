@@ -1,6 +1,8 @@
 package dev.mstheesha.afk
 
+import android.app.ActivityManager
 import android.app.Application
+import android.content.Context
 import android.net.TrafficStats
 import java.io.File
 
@@ -11,6 +13,7 @@ import java.io.File
 data class AppStats(
     val cpuPercent: Float, // % of one core used by this process
     val rssMB: Long,       // resident RAM of this process
+    val totalMemMB: Long,  // device RAM (bar scale)
     val netRxBytes: Long,  // cumulative RX of this app's UID
     val netTxBytes: Long,  // cumulative TX of this app's UID
 )
@@ -21,9 +24,13 @@ object ResourceMonitor {
 
     fun sample(app: Application): AppStats {
         val uid = app.applicationInfo.uid
+        val am = app.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mem = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mem)
         return AppStats(
             cpuPercent = processCpuPercent(),
             rssMB = rssKB() / 1024,
+            totalMemMB = (mem.totalMem / (1024 * 1024)).coerceAtLeast(1),
             netRxBytes = TrafficStats.getUidRxBytes(uid).coerceAtLeast(0),
             netTxBytes = TrafficStats.getUidTxBytes(uid).coerceAtLeast(0),
         )

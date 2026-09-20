@@ -15,7 +15,6 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
@@ -74,6 +73,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -286,20 +286,23 @@ private fun DrawerContent(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
         )
 
-        Text(
-            "Servers",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        // Running count in front of the "Servers" header (fraction only).
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-        )
-        // Running-count header for the server list below, aligned with the
-        // "Servers" header text above it.
-        Text(
-            "Active: $activeCount/${NodeRuntime.MAX_BOTS} running",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
-        )
+        ) {
+            Text(
+                "$activeCount/${NodeRuntime.MAX_BOTS}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                "Servers",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (servers.isEmpty()) {
             Text(
                 "No servers.",
@@ -367,15 +370,28 @@ private fun ResourcesPanel(active: Boolean) {
     LaunchedEffect(active) {
         while (active) {
             stats = withContext(Dispatchers.IO) { ResourceMonitor.sample(app) }
-            delay(2000)
+            delay(5000)
         }
     }
 
-    val cpu by remember { derivedStateOf { stats?.cpuPercent ?: 0f } }
-    val ram by remember { derivedStateOf { stats?.rssMB ?: 0L } }
+    // Raw per-window CPU is bursty (GC, render, Node); smooth it so the
+    // number doesn't jump between extremes every refresh.
+    var smoothCpu by remember { mutableStateOf(0f) }
+    LaunchedEffect(stats) {
+        stats?.let {
+            smoothCpu =
+                if (smoothCpu == 0f) it.cpuPercent
+                else smoothCpu * 0.65f + it.cpuPercent * 0.35f
+        }
+    }
+    val ram = stats?.rssMB ?: 0L
+    val ramFrac = stats?.let { it.rssMB.toFloat() / it.totalMemMB } ?: 0f
 
-    val cpuAnim by animateFloatAsState(targetValue = cpu / 100f, label = "cpu")
-    val ramAnim by animateFloatAsState(targetValue = (ram.toFloat() / 256f).coerceIn(0f, 1f), label = "ram")
+    val cpuAnim by animateFloatAsState(
+        targetValue = (smoothCpu / 100f).coerceIn(0f, 1f),
+        label = "cpu",
+    )
+    val ramAnim by animateFloatAsState(targetValue = ramFrac.coerceIn(0f, 1f), label = "ram")
 
     Column(Modifier.padding(horizontal = 16.dp)) {
         Text(
@@ -386,20 +402,18 @@ private fun ResourcesPanel(active: Boolean) {
         )
 
         ListItem(
-            headlineContent = {
-                AnimatedContent(targetState = "%.0f%%".format(cpu), label = "cpu_val") { v -> Text(v) }
-            },
+            headlineContent = { Text("%.0f%%".format(smoothCpu)) },
             supportingContent = { LinearProgressIndicator(progress = { cpuAnim }) },
             leadingContent = { Icon(Icons.Default.Speed, contentDescription = null) },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             modifier = Modifier.padding(vertical = 2.dp),
         )
 
         ListItem(
-            headlineContent = {
-                AnimatedContent(targetState = "${ram} MB", label = "ram_val") { v -> Text(v) }
-            },
+            headlineContent = { Text("$ram MB") },
             supportingContent = { LinearProgressIndicator(progress = { ramAnim }) },
             leadingContent = { Icon(Icons.Default.Memory, contentDescription = null) },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             modifier = Modifier.padding(vertical = 2.dp),
         )
     }
@@ -563,14 +577,13 @@ private fun ServerRow(
         isWorking -> state.replaceFirstChar { it.uppercase() }
         else -> "Offline"
     }
-    val statusColor by animateColorAsState(
+    val statusColor =
         if (isConnected) MaterialTheme.colorScheme.primary
         else if (isWorking) MaterialTheme.colorScheme.tertiary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+        else MaterialTheme.colorScheme.onSurfaceVariant
 
     Card(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).animateContentSize(),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         onClick = { onSelect(server.id) },
     ) {
         Row(
@@ -614,7 +627,15 @@ private fun ServerRow(
                 )
             }
 
-            Text(statusLabel, style = MaterialTheme.typography.labelMedium, color = statusColor)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(statusColor.copy(alpha = 0.15f))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(statusLabel, style = MaterialTheme.typography.labelMedium, color = statusColor)
+            }
 
             IconButton(onClick = onEdit) {
                 Icon(Icons.Default.Edit, contentDescription = "Edit")
@@ -960,7 +981,7 @@ private fun SessionScreen(
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
+                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Button(
