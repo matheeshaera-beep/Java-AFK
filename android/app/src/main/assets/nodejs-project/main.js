@@ -66,6 +66,7 @@ function newSession(serverId) {
     logSeq: 0,
     chatBuffer: [],
     chatSeq: 0,
+    window: null, // {title, slots:[{slot,name,count}]} while an inventory GUI is open
     // Per-session traffic accounting (socket byte counters; see netBytes).
     // TrafficStats on Android is per-UID, so every session would otherwise
     // show the same whole-app total.
@@ -182,10 +183,11 @@ function startBridgeServer() {
       return json(200, { ok: true, servers: list })
     }
 
-    // /servers/<serverId>/...
-    const m = path.match(/^\/servers\/([^/]+)(?:\/(\w+))?$/)
+    // /servers/<serverId>/... (action + optional sub-action, e.g. window/click)
+    const m = path.match(/^\/servers\/([^/]+)(?:\/(\w+)(?:\/(\w+))?)?$/)
     const serverId = m ? decodeURIComponent(m[1]) : null
     const action = m ? m[2] : null
+    const sub = m ? m[3] : null
     const sess = serverId != null ? sessions.get(serverId) : undefined
 
     if (m && action === 'start') {
@@ -295,6 +297,41 @@ function startBridgeServer() {
       const lines = sess.chatBuffer.filter(c => c.seq > after)
       return json(200, { ok: true, msgs: lines })
     }
+
+    if (action === 'window' && !sub) {
+      return json(200, {
+        ok: true,
+        open: !!sess.window,
+        title: sess.window ? sess.window.title : null,
+        slots: sess.window ? sess.window.slots : []
+      })
+    }
+
+    if (action === 'window' && sub === 'close' && req.method === 'POST') {
+      if (!sess.bot?.entity) return json(200, { ok: false, error: 'no bot' })
+      if (!sess.bot.currentWindow) return json(200, { ok: false, error: 'no open window' })
+      try {
+        const r = sess.bot.closeWindow(sess.bot.currentWindow)
+        if (r && typeof r.catch === 'function') r.catch(e => sessionLog(sess, 'window close failed: ' + e.message))
+      } catch (e) { return json(200, { ok: false, error: String((e && e.message) || e) }) }
+      sessionLog(sess, 'Window closed by user')
+      return json(200, { ok: true })
+    }
+
+    if (action === 'window' && sub === 'click' && req.method === 'POST') {      return readBody(cmd => {
+        if (typeof cmd === 'string') return json(400, { ok: false, error: cmd })
+        const slot = cmd.slot
+        if (typeof slot !== 'number' || slot < 0) return json(400, { ok: false, error: 'slot must be a number' })
+        if (!sess.bot?.entity) return json(400, { ok: false, error: 'no bot' })
+        if (!sess.window) return json(400, { ok: false, error: 'no open window' })
+        try {
+          const r = sess.bot.clickWindow(slot, 0, 0)
+          if (r && typeof r.catch === 'function') r.catch(e => sessionLog(sess, 'window click failed: ' + e.message))
+        } catch (e) { return json(400, { ok: false, error: String((e && e.message) || e) }) }
+        sessionLog(sess, 'Window click: slot ' + slot)
+        return json(200, { ok: true })
+      })
+    }
   })
 
   bridge.on('error', err => {
@@ -378,6 +415,7 @@ function statusOf(sess) {
 function disposeBot(sess) {
   const bot = sess.bot
   sess.bot = null
+  sess.window = null
   if (!bot) return
   try { bot.on('error', () => {}) } catch (e) {}
   try { bot.quit('Session closed') } catch (e) {}
@@ -605,6 +643,36 @@ function createBot(sess) {
         if (!dup) pushChat(sess, 'chat', null, line)
       } catch (e) { sessionLog(sess, 'profileless_chat: ' + e.message) }
     }, 300)
+  })
+
+  // Inventory GUI: snapshot title + non-empty slots (text only, no icons)
+  // while a window is open; cleared on close (and on dispose/reconnect).
+  const snapshotWindow = (window) => {
+    if (!window) { sess.window = null; return }
+    const slots = []
+    try {
+      const arr = window.slots || []
+      for (let i = 0; i < arr.length; i++) {
+        const item = arr[i]
+        if (item) slots.push({ slot: i, name: item.displayName || item.name || 'item', count: item.count || 1 })
+      }
+    } catch (e) {}
+    // window.title is raw NBT — same [object Object] trap as kick reasons.
+    let title = ''
+    try { title = reasonText(currentBot, window.title) } catch (e) {}
+    sess.window = { title, slots }
+    sessionLog(sess, 'Window opened: ' + (title || '(untitled)') + ' (' + slots.length + ' items)')
+  }
+
+  currentBot.on('windowOpen', (window) => {
+    if (currentBot !== sess.bot) return
+    snapshotWindow(window)
+  })
+
+  currentBot.on('windowClose', (window) => {
+    if (currentBot !== sess.bot) return
+    sess.window = null
+    sessionLog(sess, 'Window closed')
   })
 
   currentBot.on('kicked', (reason, loggedIn) => {

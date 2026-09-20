@@ -118,6 +118,20 @@ class ServerSession(private val context: Context, val serverId: Long) {
         val text: String,
     )
 
+    data class WindowSlot(
+        val slot: Int,
+        val name: String,
+        val count: Int,
+    )
+
+    data class OpenWindow(
+        val title: String,
+        val slots: List<WindowSlot>,
+    )
+
+    private val _window = MutableStateFlow<OpenWindow?>(null)
+    val window: StateFlow<OpenWindow?> = _window
+
     /** Stable unique id per line so LazyColumn can key items (no takeLast
      *  window in the UI, no jump on updates). Bridge lines use the bridge
      *  seq; local-only lines use negative ids from [nextLocalLogId]. */
@@ -208,6 +222,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
                 bridgeDataBytes = -1
+                _window.value = null
                 pushLog("Stopped")
             }
         }
@@ -260,6 +275,21 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
+    fun clickSlot(slot: Int) {
+        scope.launch {
+            post("window/click", JSONObject().put("slot", slot), quiet = true)
+        }
+    }
+
+    /** Closes the server-side window (swiping the sheet down). The sheet
+     *  itself is dropped from composition at once; the null window state
+     *  arriving on the next poll confirms it. */
+    fun closeWindow() {
+        scope.launch {
+            post("window/close", JSONObject(), quiet = true)
+        }
+    }
+
     fun clearToken() {        scope.launch {
             val authDir = File(context.filesDir, "minecraft-auth")
             if (authDir.exists()) authDir.deleteRecursively()
@@ -281,6 +311,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
                 bridgeDataBytes = -1
+                _window.value = null
             }
         }
     }
@@ -329,6 +360,12 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     pollMerged()
                     if (_state.value == "disconnected") {
                         polling.set(false)
+                    } else if (_state.value == "connected") {
+                        // Window contents at 1 Hz while connected, in this
+                        // same coroutine — no second ticker, no extra wakeups
+                        // while idle or backgrounded.
+                        pollWindow()
+                        delay(1000)
                     } else {
                         // Fast while the UI is visible, slow and
                         // battery-friendly when the screen is off.
@@ -453,6 +490,28 @@ class ServerSession(private val context: Context, val serverId: Long) {
             setState("disconnected")
             _detail.value = ""
         }
+    }
+
+    /** GETs /window with the same get() helper as /status and /logs. */
+    private suspend fun pollWindow() {
+        if (_state.value != "connected") {
+            if (_window.value != null) _window.value = null
+            return
+        }
+        val obj = get("window") ?: return
+        if (!obj.optBoolean("open", false)) {
+            _window.value = null
+            return
+        }
+        val arr = obj.optJSONArray("slots")
+        val slots = mutableListOf<WindowSlot>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val m = arr.optJSONObject(i) ?: continue
+                slots.add(WindowSlot(m.optInt("slot"), m.optString("name"), m.optInt("count", 1)))
+            }
+        }
+        _window.value = OpenWindow(obj.optString("title"), slots)
     }
 
     /** Fetch any missed chat once (called when the chat tab opens). */

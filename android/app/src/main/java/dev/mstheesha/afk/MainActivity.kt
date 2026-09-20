@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
@@ -85,6 +86,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
@@ -102,6 +104,7 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -950,7 +953,7 @@ private fun ServerSettingsDialog(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 private fun SessionScreen(
     serverId: Long,
     snackbarHostState: SnackbarHostState,
@@ -966,6 +969,7 @@ private fun SessionScreen(
     val logs by session.logs.collectAsState()
     val chat by session.chat.collectAsState()
     val authRequired by session.authRequired.collectAsState()
+    val openWindow by session.window.collectAsState()
     val activeCount by AppGraph.activeCount.collectAsState(initial = 0)
     var kickedCount by remember { mutableIntStateOf(0) }
     var chatInput by remember { mutableStateOf("") }
@@ -1305,6 +1309,55 @@ private fun SessionScreen(
                                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Inventory GUI: sheet lives exactly while a window is open — rows stay
+    // tappable across multiple clicks, and it dismisses itself when the
+    // window state goes null. No icons/textures, text only. Swiping down
+    // closes the server-side window AND drops the sheet at once: leaving a
+    // hidden-but-composed sheet would keep its scrim eating all touches.
+    var windowDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(openWindow) {
+        if (openWindow == null) windowDismissed = false
+    }
+    if (openWindow != null && !windowDismissed) {
+        val w = openWindow!!
+        ModalBottomSheet(
+            onDismissRequest = {
+                windowDismissed = true
+                session.closeWindow()
+            },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        ) {
+            Text(
+                w.title,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+            LazyColumn {
+                items(w.slots, key = { it.slot }) { s ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { session.clickSlot(s.slot) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            s.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            "×${s.count}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
