@@ -1,4 +1,4 @@
-# Java AFK v2.1
+# Java AFK v2.2
 
 Android app that keeps your Minecraft **Java Edition** account online (AFK) on any
 server — backed by [mineflayer](https://github.com/PrismarineJS/mineflayer)
@@ -11,7 +11,7 @@ for headless/CLI use.
 - **Server list** — add, edit and delete servers (name, host, port).
 - **Online + offline mode** — Microsoft device-code sign-in with saved token,
   or offline usernames.
-- **Up to 2 bots at once**, each with its own session screen.
+- **Up to 5 bots at once**, each with its own session screen.
 - **Live connection stages** — bridge boot → connecting → authenticating →
   logging in → connected, with an "Online as X · auth · host:port" summary.
 - **Live logs + chat** — bridge log stream, per-server chat send/receive.
@@ -52,7 +52,8 @@ Tips:
   you need more chunks.
 - If Microsoft asks again later, use **Clear token** in the server settings
   and Start again.
-- Two servers can run at the same time; a third Start is refused with a message.
+- Up to 5 servers can run at the same time (each bot costs CPU, RAM and
+  data — watch the drawer usage panel); a sixth Start is refused with a message.
 - Stopping the last server releases the wake lock and stops the service, so
   the phone sleeps normally with zero bots.
 

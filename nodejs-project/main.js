@@ -9,11 +9,11 @@ const DEFAULT_USERNAME = 'AFKBot'
 const DEFAULT_AUTH = 'offline'
 const BRIDGE_PORT = 3001 // shifted from 3000: old manual install (dev.mstheesha.afk) owns 3000 while running
 const MAX_BODY = 1024 * 64 // 64 KB max bridge request body
-const MAX_BOTS = 2 // hard limit: max 2 concurrent servers/bots
+const MAX_BOTS = 5 // hard limit: max 5 concurrent servers/bots
 const MAX_CHAT = 500 // ring buffer of chat messages per server
 const MAX_LOGS = 500 // ring buffer of log lines per server
 const MAX_SAVE_CHAR = 0 // placeholder to keep fs usage intentional
-const BOT_VERSION = '2.1'
+const BOT_VERSION = '2.2'
 
 // Timing (overridable by env for tests).
 const CONNECT_TIMEOUT_MS = parseInt(process.env.AFK_CONNECT_TIMEOUT_MS || '60000', 10)
@@ -186,7 +186,7 @@ function startBridgeServer() {
         if (sess && sess.sessionActive) return json(200, { ok: true, already: true })
         const activeCount = [...sessions.values()].filter(s => s.sessionActive).length
         if (activeCount >= MAX_BOTS) {
-          return json(409, { ok: false, error: 'Maximum 2 servers can run at the same time.' })
+          return json(409, { ok: false, error: 'Maximum ' + MAX_BOTS + ' servers can run at the same time.' })
         }
         const s = sess || newSession(serverId)
         sessions.set(serverId, s)
@@ -605,7 +605,7 @@ process.on('uncaughtException', (err) => {
 // ============ STARTUP ============
 if (require.main === module) {
   startBridgeServer()
-  origLog('Java AFK Bot ready v2.1 (single bridge on port ' + BRIDGE_PORT + ')')
+  origLog('Java AFK Bot ready v' + BOT_VERSION + ' (single bridge on port ' + BRIDGE_PORT + ')')
 } else {
   module.exports = { reasonText, sessions, newSession, scheduleReconnect, handleDown, createBot, disposeBot }
 }

@@ -34,7 +34,7 @@ object NodeRuntime {
         .build()
 
     const val baseUrl = "http://127.0.0.1:3001" // shifted from 3000: old manual install owns 3000 while running
-    const val MAX_BOTS = 2
+    const val MAX_BOTS = 5
 
     // JNI native methods
     external fun startNodeWithArguments(args: Array<String>): Int

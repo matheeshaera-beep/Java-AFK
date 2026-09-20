@@ -168,7 +168,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 if (res != null) {
                     if (res.optInt("status", 0) == 409) {
                         setState("error")
-                        _detail.value = res.optString("error", "Maximum 2 servers can run at the same time.")
+                        _detail.value = res.optString("error", "Maximum ${NodeRuntime.MAX_BOTS} servers can run at the same time.")
                         pushLog(_detail.value)
                         return@withLock
                     }
