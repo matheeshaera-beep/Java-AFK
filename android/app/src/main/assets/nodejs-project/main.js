@@ -20,6 +20,11 @@ const CONNECT_TIMEOUT_MS = parseInt(process.env.AFK_CONNECT_TIMEOUT_MS || '60000
 const STABLE_MS = parseInt(process.env.AFK_STABLE_MS || '60000', 10)
 const BACKOFF_BASE_MS = parseInt(process.env.AFK_BACKOFF_BASE_MS || '5000', 10)
 const BACKOFF_CAP_MS = 300000 // 5 min
+// Hearts/hunger log cadence while connected and spawned (overridable by
+// env for tests). Logged once immediately on spawn, then on this interval
+// regardless of changes; on-change damage lines are rate-limited separately.
+const STATUS_LOG_INTERVAL_MS = parseInt(process.env.AFK_STATUS_LOG_MS || '30000', 10)
+const VITALS_EVENT_MIN_GAP_MS = 5000
 // Identical consecutive log lines inside this window collapse into one
 // line with a counter ("Window closed ×17") instead of flooding the log.
 const LOG_DEDUP_WINDOW_MS = 2000
@@ -67,6 +72,8 @@ function newSession(serverId) {
     connectTimer: null,
     stableTimer: null,
     reconnectTimer: null,
+    statusTimer: null, // 30s hearts/hunger log while spawned (single owner: spawn)
+    lastVitalsLogAt: 0,
     pendingMsaCode: null,
     logBuffer: [], // entries: {seq, text}; seq from logSeq, monotonic per session
     logSeq: 0,
@@ -132,6 +139,36 @@ function pushChat(sess, type, sender, text) {
   if (sess.chatBuffer.length > MAX_CHAT) sess.chatBuffer.shift()
 }
 
+// Hearts/hunger line. Same format the app has always shown:
+// "HH:mm:ss Hearts 10/10 · Hunger 20/20". Logged through sessionLog so it
+// shares the bridge clock and stays chronologically ordered with every
+// other line (the old Kotlin-side logging used the UI clock and could land
+// above older bridge lines).
+function logVitals(sess) {
+  try {
+    const bot = sess.bot
+    if (!bot || bot.health == null || bot.food == null) return
+    const hearts = bot.health / 2.0
+    const heartsStr = Number.isInteger(hearts) ? String(hearts) : hearts.toFixed(1)
+    sessionLog(sess, 'Hearts ' + heartsStr + '/10 · Hunger ' + bot.food + '/20')
+    sess.lastVitalsLogAt = Date.now()
+  } catch (e) {}
+}
+
+// Single owner is spawn (cleared on end/kick/error/stop/reconnect via
+// clearAllTimers/disposeBot), so reconnects can never stack duplicate
+// timers. Ticks often, logs at STATUS_LOG_INTERVAL_MS cadence.
+function startVitalsTimer(sess) {
+  clearTimer(sess, 'statusTimer')
+  sess.statusTimer = setInterval(() => {
+    try {
+      if (!sess.sessionActive || sess.phase !== 'online' || !sess.bot?.entity) return
+      if (Date.now() - (sess.lastVitalsLogAt || 0) < STATUS_LOG_INTERVAL_MS) return
+      logVitals(sess)
+    } catch (e) {}
+  }, Math.min(STATUS_LOG_INTERVAL_MS, 5000))
+}
+
 // mineflayer 4.39 hands `kicked` the raw packet.reason, which is an NBT
 // object on 1.20.3+ — String() on it gives "Kicked: [object Object]".
 function reasonText(bot, r) {
@@ -150,6 +187,7 @@ function clearAllTimers(sess) {
   clearTimer(sess, 'connectTimer')
   clearTimer(sess, 'stableTimer')
   clearTimer(sess, 'reconnectTimer')
+  clearTimer(sess, 'statusTimer')
 }
 
 // ============ BRIDGE SERVER (single, bound once per process) ============
@@ -451,6 +489,7 @@ function disposeBot(sess) {
   const bot = sess.bot
   sess.bot = null
   sess.window = null
+  clearTimer(sess, 'statusTimer')
   if (!bot) return
   try { bot.on('error', () => {}) } catch (e) {}
   try { bot.quit('Session closed') } catch (e) {}
@@ -628,6 +667,11 @@ function createBot(sess) {
         }
       }, (sess.config.commandDelaySeconds || 5) * 1000)
     }
+    // Vitals: one line immediately on spawn, then every
+    // STATUS_LOG_INTERVAL_MS while spawned (single timer — re-created
+    // here each spawn, cleared on every down path).
+    logVitals(sess)
+    startVitalsTimer(sess)
   })
 
   // Chat capture — uses messages mineflayer already receives over the Minecraft
@@ -678,6 +722,16 @@ function createBot(sess) {
         if (!dup) pushChat(sess, 'chat', null, line)
       } catch (e) { sessionLog(sess, 'profileless_chat: ' + e.message) }
     }, 300)
+  })
+
+  // On-change vitals (damage/heal shows promptly) but rate-limited so
+  // damage spam can't flood the log; the 30s timer covers the quiet case.
+  currentBot.on('health', () => {
+    if (currentBot !== sess.bot || sess.phase !== 'online') return
+    try {
+      if (Date.now() - (sess.lastVitalsLogAt || 0) < VITALS_EVENT_MIN_GAP_MS) return
+      logVitals(sess)
+    } catch (e) {}
   })
 
   // Inventory GUI: snapshot title + non-empty slots (text only, no icons)
