@@ -154,6 +154,11 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 // Baseline for this session's data-usage counter.
                 dataBaselineBytes = uidBytes()
                 _sessionDataBytes.value = 0
+                // Fresh run: time restarts here (and on Stop). Drops and
+                // reconnects in between keep accumulating instead.
+                accumulatedMs = 0
+                connectedAtMs = 0
+                _afkSeconds.value = 0
                 val blocked = { msg: String ->
                     setState("error")
                     _detail.value = msg
