@@ -20,6 +20,12 @@ const CONNECT_TIMEOUT_MS = parseInt(process.env.AFK_CONNECT_TIMEOUT_MS || '60000
 const STABLE_MS = parseInt(process.env.AFK_STABLE_MS || '60000', 10)
 const BACKOFF_BASE_MS = parseInt(process.env.AFK_BACKOFF_BASE_MS || '5000', 10)
 const BACKOFF_CAP_MS = 300000 // 5 min
+// Identical consecutive log lines inside this window collapse into one
+// line with a counter ("Window closed ×17") instead of flooding the log.
+const LOG_DEDUP_WINDOW_MS = 2000
+// Extra window diagnostics (windowOpen details + raw open/close packets).
+// Off by default; enable with AFK_DEBUG_WINDOWS=1.
+const DEBUG_WINDOWS = process.env.AFK_DEBUG_WINDOWS === '1'
 
 const origLog = console.log
 
@@ -64,6 +70,11 @@ function newSession(serverId) {
     pendingMsaCode: null,
     logBuffer: [], // entries: {seq, text}; seq from logSeq, monotonic per session
     logSeq: 0,
+    // Flood-collapse state for sessionLog (last line + repeat counter).
+    lastLogMsg: null,
+    lastLogBase: null,
+    lastLogCount: 0,
+    lastLogAt: 0,
     chatBuffer: [],
     chatSeq: 0,
     window: null, // {title, slots:[{slot,name,count}]} while an inventory GUI is open
@@ -86,9 +97,25 @@ function dayTime() {
 
 function sessionLog(sess, msg) {
   try {
+    msg = String(msg)
+    const now = Date.now()
+    // Generic flood guard: an identical line repeated within a short window
+    // collapses into the previous entry with a counter, so no event
+    // (window closes, damage ticks, ...) can flood the log again.
+    if (sess.lastLogMsg === msg && (now - sess.lastLogAt) < LOG_DEDUP_WINDOW_MS && sess.logBuffer.length) {
+      sess.lastLogCount = (sess.lastLogCount || 1) + 1
+      sess.lastLogAt = now
+      sess.logBuffer[sess.logBuffer.length - 1].text = sess.lastLogBase + ' ×' + sess.lastLogCount
+      origLog('[' + sess.serverId + ']', msg + ' (×' + sess.lastLogCount + ')')
+      return
+    }
     const line = dayTime() + ' ' + String(msg)
     sess.logBuffer.push({ seq: ++sess.logSeq, text: line })
     if (sess.logBuffer.length > MAX_LOGS) sess.logBuffer.shift()
+    sess.lastLogMsg = msg
+    sess.lastLogBase = line
+    sess.lastLogCount = 1
+    sess.lastLogAt = now
     origLog('[' + sess.serverId + ']', msg)
   } catch (e) {}
 }
@@ -669,17 +696,50 @@ function createBot(sess) {
     let title = ''
     try { title = reasonText(currentBot, window.title) } catch (e) {}
     sess.window = { title, slots }
-    sessionLog(sess, 'Window opened: ' + (title || '(untitled)') + ' (' + slots.length + ' items)')
+    const names = slots.slice(0, 10).map(s => s.name + (s.count > 1 ? ' ×' + s.count : ''))
+    sessionLog(sess, 'Window opened: ' + (title || '(untitled)') +
+      ' (' + (window.type || '?') + ', ' + (window.slots || []).length + ' slots)' +
+      (names.length ? ' items: ' + names.join(', ') + (slots.length > 10 ? ', …' : '') : ''))
   }
 
   currentBot.on('windowOpen', (window) => {
     if (currentBot !== sess.bot) return
+    if (DEBUG_WINDOWS) {
+      try {
+        sessionLog(sess, 'dbg windowOpen: id=' + window.id + ' type=' + window.type +
+          ' title=' + reasonText(currentBot, window.title))
+      } catch (e) {}
+    }
     snapshotWindow(window)
   })
+
+  // Raw open/close packets (server-driven GUIs: lobby menus, selectors,
+  // verification screens). Debug only — off by default.
+  if (DEBUG_WINDOWS) {
+    const dbgPkt = (kind) => (pkt) => {
+      if (currentBot !== sess.bot) return
+      try {
+        let title = ''
+        try { title = reasonText(currentBot, pkt.windowTitle) } catch (e) {}
+        sessionLog(sess, 'dbg ' + kind + ': windowId=' + pkt.windowId +
+          (pkt.inventoryType != null ? ' type=' + pkt.inventoryType : '') +
+          (title ? ' title=' + title : ''))
+      } catch (e) {}
+    }
+    currentBot._client.on('open_window', dbgPkt('open_window'))
+    currentBot._client.on('close_window', dbgPkt('close_window'))
+  }
 
   currentBot.on('windowClose', (window) => {
     if (currentBot !== sess.bot) return
     sess.window = null
+    if (!window) {
+      // Server sent close_window with nothing open (lobby heartbeats,
+      // duplicate closes, subserver switches). Nothing happened — this is
+      // what used to flood the log ~17×/s on servers like Donut SMP.
+      if (DEBUG_WINDOWS) sessionLog(sess, 'Window close (nothing open)')
+      return
+    }
     sessionLog(sess, 'Window closed')
   })
 
@@ -734,5 +794,5 @@ if (require.main === module) {
   startBridgeServer()
   origLog('Java AFK Bot ready v' + BOT_VERSION + ' (single bridge on port ' + BRIDGE_PORT + ')')
 } else {
-  module.exports = { reasonText, sessions, newSession, scheduleReconnect, handleDown, createBot, disposeBot }
+  module.exports = { reasonText, sessions, newSession, scheduleReconnect, handleDown, createBot, disposeBot, sessionLog }
 }
