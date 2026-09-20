@@ -25,7 +25,7 @@ data class ServerEntity(
     val commandDelaySeconds: Int = 5,
     val onlineMode: Boolean = false,
     val username: String = "",
-    val viewDistance: Int = 12,
+    val viewDistance: Int = 2,
     val chatMode: String = "enabled", // enabled | commandsOnly | hidden
 )
 

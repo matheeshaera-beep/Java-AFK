@@ -125,6 +125,16 @@ import java.io.File
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    override fun onStart() {
+        super.onStart()
+        AppGraph.uiVisible = true
+    }
+
+    override fun onStop() {
+        AppGraph.uiVisible = false
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         AppGraph.init(applicationContext)
         AppGraph.setContext(applicationContext)
@@ -618,12 +628,12 @@ private data class ServerDraft(
     val commandDelaySeconds: String = "5",
     val onlineMode: Boolean = false,
     val username: String = "",
-    val viewDistance: String = "12",
+    val viewDistance: String = "2",
     val chatMode: String = "enabled", // enabled | commandsOnly | hidden
 ) {
     val portInt: Int get() = port.toIntOrNull()?.coerceIn(1, 65535) ?: 25565
     val delayInt: Int get() = commandDelaySeconds.toIntOrNull()?.coerceIn(0, 3600) ?: 5
-    val viewDistanceInt: Int get() = viewDistance.toIntOrNull()?.coerceIn(2, 12) ?: 12
+    val viewDistanceInt: Int get() = viewDistance.toIntOrNull()?.coerceIn(2, 12) ?: 2
     val portValid: Boolean get() = port.toIntOrNull()?.let { it in 1..65535 } ?: false
 
     companion object {
@@ -762,7 +772,7 @@ private fun ServerSettingsDialog(
                     Column(Modifier.weight(1f)) {
                         Text("View distance (chunks)", style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            "Higher = more chunks loaded from server (2–12). Farm production depends on the server's simulation-distance, not this.",
+                            "Higher = more chunks loaded from server (2–12). Farm production depends on the server's simulation-distance, not this. Lower = less battery and data. 2 is enough for AFK.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -868,12 +878,22 @@ private fun SessionScreen(
         if (atBottom) followNewest = true
     }
 
-    // Only poll the localbridge for chat while the chat tab is open (no data waste).
+    // Chat is pulled in the session poll loop even with the tab closed; this
+    // just tops it up the moment the tab opens.
     LaunchedEffect(showChat) {
         session.setChatPolling(showChat)
         if (showChat) {
             // Ensure server chat already ingested is shown, even if status poll is idle.
             session.refreshChatNow()
+        }
+    }
+
+    // 1 s counter ticker, alive only while this screen is composed (the
+    // session itself runs no background ticker anymore).
+    LaunchedEffect(serverId) {
+        while (true) {
+            delay(1000)
+            session.refreshCounters()
         }
     }
 

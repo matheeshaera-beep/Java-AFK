@@ -11,6 +11,7 @@ import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -19,6 +20,7 @@ class AfkService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private val scope = MainScope()
+    private var startElapsedMs = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -34,10 +36,23 @@ class AfkService : Service() {
         scope.launch {
             AppGraph.namesTick.collect { refreshNotification() }
         }
+        // The wake lock follows the active-session count: held while at
+        // least one bot runs, released as soon as the last one stops so the
+        // phone can sleep with zero bots.
+        scope.launch {
+            AppGraph.activeCount.collect { onActiveCount(it) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        // START_NOT_STICKY: after a process kill Android must NOT restart us
+        // with a null intent (that used to leave a notification + wake lock
+        // with no Node and no bot behind).
+        if (intent == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (intent.action == ACTION_STOP) {
             // Force-stop: disconnect every session first so nothing is left
             // showing a stale Connected state, then drop the foreground
             // notification, release the wake lock, and stop the service.
@@ -46,10 +61,25 @@ class AfkService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             releaseWakeLock()
             stopSelf()
-        } else {
-            startForegroundCompat()
+            return START_NOT_STICKY
         }
-        return START_STICKY
+        startElapsedMs = SystemClock.elapsedRealtime()
+        startForegroundCompat()
+        return START_NOT_STICKY
+    }
+
+    private fun onActiveCount(n: Int) {
+        if (n > 0) {
+            acquireWakeLock()
+            return
+        }
+        if (startElapsedMs == 0L) return // no start yet; not ours to stop
+        // Ignore the transient 0 right after start (the state flips when the
+        // session leaves 'disconnected' a moment later).
+        if (SystemClock.elapsedRealtime() - startElapsedMs < 10_000) return
+        releaseWakeLock()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun startForegroundCompat() {

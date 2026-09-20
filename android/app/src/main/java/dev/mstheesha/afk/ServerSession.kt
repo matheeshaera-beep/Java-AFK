@@ -2,8 +2,10 @@ package dev.mstheesha.afk
 
 import android.content.Context
 import android.net.TrafficStats
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,7 +26,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ServerSession(private val context: Context, val serverId: Long) {
 
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e ->
+            android.util.Log.w("ServerSession", "unhandled: ${e.message}")
+        },
+    )
     private val mutex = Mutex()
     private val sessionKey = serverId.toString()
 
@@ -41,24 +47,39 @@ class ServerSession(private val context: Context, val serverId: Long) {
     val chat = _chat
 
     // Session-owned counters: survive UI navigation (unlike composable
-    // remember state). Tick while connected; zeroed on stop/dispose.
+    // remember state). Time accrues only while 'connected'; reset only on
+    // Stop. No background ticker — refreshCounters() recomputes from the
+    // poll loop plus a 1 s UI ticker that exists only while SessionScreen
+    // is composed.
     private val _afkSeconds = MutableStateFlow(0L)
     val afkSeconds: StateFlow<Long> = _afkSeconds
     private val _sessionDataBytes = MutableStateFlow(0L)
     val sessionDataBytes: StateFlow<Long> = _sessionDataBytes
     private var dataBaselineBytes = 0L
+    private var connectedAtMs = 0L
+    private var accumulatedMs = 0L
 
-    init {
-        scope.launch {
-            while (true) {
-                delay(1000)
-                if (_state.value == "connected") {
-                    _afkSeconds.value++
-                    _sessionDataBytes.value =
-                        (uidBytes() - dataBaselineBytes).coerceAtLeast(0L)
-                }
-            }
+    /** All state transitions go through here for connected-time accounting. */
+    private fun setState(s: String) {
+        if (_state.value == s) return
+        val now = System.currentTimeMillis()
+        if (_state.value == "connected" && connectedAtMs > 0) {
+            accumulatedMs += now - connectedAtMs
+            connectedAtMs = 0
         }
+        _state.value = s
+        if (s == "connected" && connectedAtMs == 0L) connectedAtMs = now
+        refreshCounters()
+    }
+
+    /** Recomputes the visible counters from the accounting above. */
+    fun refreshCounters() {
+        val now = System.currentTimeMillis()
+        val extra =
+            if (_state.value == "connected" && connectedAtMs > 0) now - connectedAtMs else 0
+        _afkSeconds.value = (accumulatedMs + extra) / 1000
+        _sessionDataBytes.value =
+            (uidBytes() - dataBaselineBytes).coerceAtLeast(0L)
     }
 
     private fun uidBytes(): Long {
@@ -128,13 +149,13 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 lastServerRef =
                     config.optString("host") + ":" + config.optInt("port", 25565)
                 // Live stage 1: visible immediately, before the bridge poll.
-                _state.value = "connecting"
+                setState("connecting")
                 _detail.value = "Starting local bridge…"
                 // Baseline for this session's data-usage counter.
                 dataBaselineBytes = uidBytes()
                 _sessionDataBytes.value = 0
                 val blocked = { msg: String ->
-                    _state.value = "error"
+                    setState("error")
                     _detail.value = msg
                     pushLog("Node assets blocked: $msg")
                 }
@@ -146,7 +167,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 val res = post("start", config)
                 if (res != null) {
                     if (res.optInt("status", 0) == 409) {
-                        _state.value = "error"
+                        setState("error")
                         _detail.value = res.optString("error", "Maximum 2 servers can run at the same time.")
                         pushLog(_detail.value)
                         return@withLock
@@ -154,7 +175,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 } else {
                     pushLog("Start command not acknowledged")
                 }
-                _state.value = "connecting"
+                setState("connecting")
                 _detail.value = "Connecting to server…"
                 startPolling()
             }
@@ -164,11 +185,16 @@ class ServerSession(private val context: Context, val serverId: Long) {
     fun stop() {
         scope.launch {
             mutex.withLock {
-                if (_state.value == "disconnected") return@withLock
-                post("stop", JSONObject())
+                polling.set(false)
+                // Always tell the bridge, even if we already look
+                // disconnected (a wedged pre-spawn attempt still retries
+                // server-side until it hears stop).
+                post("stop", JSONObject(), quiet = true)
                 _authRequired.value = null
-                _state.value = "disconnected"
+                setState("disconnected")
                 _detail.value = ""
+                accumulatedMs = 0
+                connectedAtMs = 0
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
                 pushLog("Stopped")
@@ -183,8 +209,9 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     if (!NodeRuntime.ensureStarted()) { pushLog("Bridge not ready"); return@withLock }
                 }
                 post("reconnect", JSONObject())
-                _state.value = "connecting"
+                setState("connecting")
                 _detail.value = "Connecting to server…"
+                startPolling()
             }
         }
     }
@@ -217,11 +244,12 @@ class ServerSession(private val context: Context, val serverId: Long) {
     fun dispose() {
         scope.launch {
             mutex.withLock {
-                if (_state.value != "disconnected") {
-                    post("stop", JSONObject())
-                }
-                _state.value = "disconnected"
+                polling.set(false)
+                post("stop", JSONObject(), quiet = true)
+                setState("disconnected")
                 _detail.value = ""
+                accumulatedMs = 0
+                connectedAtMs = 0
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
             }
@@ -230,7 +258,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
 
     // ============ INTERNAL ============
 
-    private fun post(action: String, json: JSONObject): JSONObject? {
+    private fun post(action: String, json: JSONObject, quiet: Boolean = false): JSONObject? {
         return try {
             val body = json.toString().toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
@@ -241,11 +269,11 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 val b = res.body?.string() ?: "{}"
                 val obj = try { JSONObject(b) } catch (e: Exception) { JSONObject() }
                 obj.put("status", res.code)
-                if (!res.isSuccessful) pushLog("Command failed: ${res.code} ${obj.optString("error")}")
+                if (!res.isSuccessful && !quiet) pushLog("Command failed: ${res.code} ${obj.optString("error")}")
                 obj
             }
         } catch (e: Exception) {
-            pushLog("Command error: ${e.message}")
+            if (!quiet) pushLog("Command error: ${e.message}")
             null
         }
     }
@@ -267,10 +295,19 @@ class ServerSession(private val context: Context, val serverId: Long) {
     private fun startPolling() {
         if (!polling.compareAndSet(false, true)) return
         scope.launch {
-            while (polling.get()) {
-                pollOnce()
-                pullLogs()
-                delay(3000)
+            try {
+                while (polling.get()) {
+                    pollMerged()
+                    if (_state.value == "disconnected") {
+                        polling.set(false)
+                    } else {
+                        // Fast while the UI is visible, slow and
+                        // battery-friendly when the screen is off.
+                        delay(if (AppGraph.uiVisible) 3000 else 20000)
+                    }
+                }
+            } finally {
+                polling.set(false)
             }
         }
     }
@@ -286,24 +323,39 @@ class ServerSession(private val context: Context, val serverId: Long) {
     private var lastLoggedHearts = Double.NaN
     private var lastLoggedFood = -1
 
-    /** Merges new lines from the bridge's per-session log buffer into the
-     *  visible log. Without this the panel only ever showed local lines
-     *  (e.g. "Stopped") while the bridge logged everything. */
-    private fun pullLogs() {
-        val obj = get("logs?after=$lastLogSeq") ?: return
-        val arr = obj.optJSONArray("logs") ?: return
-        for (i in 0 until arr.length()) {
-            val e = arr.optJSONObject(i) ?: continue
-            pushBridgeLog(e.optLong("seq"), e.optString("text"))
+    /** ONE bridge request per cycle: status + new logs + new chat (replaces
+     *  the old 2-request status+logs loop plus the tab-gated chat pull). */
+    private fun pollMerged() {
+        val obj = get("poll?logAfter=$lastLogSeq&chatAfter=$lastChatSeq") ?: return
+        obj.optJSONObject("status")?.let { handleStatus(it) }
+        val logs = obj.optJSONArray("logs")
+        if (logs != null) {
+            for (i in 0 until logs.length()) {
+                val e = logs.optJSONObject(i) ?: continue
+                pushBridgeLog(e.optLong("seq"), e.optString("text"))
+            }
         }
+        val msgs = obj.optJSONArray("msgs")
+        if (msgs != null) {
+            for (i in 0 until msgs.length()) {
+                val m = msgs.optJSONObject(i) ?: continue
+                pushChat(
+                    m.optInt("seq"),
+                    m.optLong("ts"),
+                    m.optString("type", "chat"),
+                    m.optString("sender").ifBlank { null },
+                    m.optString("text"),
+                )
+            }
+        }
+        refreshCounters()
     }
 
-    private suspend fun pollOnce() {
-        val status = get("status") ?: return
+    private fun handleStatus(status: JSONObject) {
         if (status.optBoolean("active", false)) {
             when {
                 status.optBoolean("connected") -> {
-                    _state.value = "connected"
+                    setState("connected")
                     _detail.value = buildString {
                         append("Online as ${status.optString("username")}")
                         if (lastAuthLabel.isNotBlank()) append(" · $lastAuthLabel")
@@ -340,7 +392,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 status.has("msa_code") -> {
                     val msa = status.optJSONObject("msa_code")
                     if (msa != null) {
-                        _state.value = "authenticating"
+                        setState("authenticating")
                         val url = msa.optString("verificationUri", "https://www.microsoft.com/link")
                         val code = msa.optString("userCode", "")
                         _detail.value = "Sign in required"
@@ -350,7 +402,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     }
                 }
                 status.optBoolean("loggingIn") -> {
-                    _state.value = "connecting"
+                    setState("connecting")
                     _detail.value = "Logging in…"
                 }
                 _state.value == "connecting" || _state.value == "authenticating" -> {
@@ -358,13 +410,9 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 }
             }
         } else {
-            _state.value = "disconnected"
+            setState("disconnected")
             _detail.value = ""
         }
-        // Chat is pulled in the same loop as status and logs, even while the
-        // chat tab is closed — otherwise the ring buffer rotates real chat
-        // out before the user ever opens the tab.
-        pullChat(status.optBoolean("connected"))
     }
 
     /** Fetch any missed chat once (called when the chat tab opens). */

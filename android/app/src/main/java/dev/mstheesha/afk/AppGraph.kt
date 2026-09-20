@@ -16,6 +16,11 @@ object AppGraph {
     private val _activeCount = MutableStateFlow(0)
     val activeCount: Flow<Int> get() = _activeCount
 
+    /** True while the UI is in the foreground. The session poll loop uses a
+     *  fast interval then, and a slow one when the screen is off. */
+    @Volatile
+    var uiVisible = false
+
     // Display names for sessions, keyed by server id. The notification reads
     // these to show which server(s) are actually running.
     private val serverNames = mutableMapOf<Long, String>()

@@ -259,28 +259,20 @@ function startBridgeServer() {
     }
 
     if (action === 'status') {
-      const status = {
+      return json(200, statusOf(sess))
+    }
+
+    // Merged poll: ONE request returns status + new logs + new chat (the UI
+    // polls this instead of 2-3 separate requests; old endpoints still work).
+    if (action === 'poll') {
+      const logAfter = parseInt(url.searchParams.get('logAfter') || '0', 10)
+      const chatAfter = parseInt(url.searchParams.get('chatAfter') || '0', 10)
+      return json(200, {
         ok: true,
-        active: sess.sessionActive,
-        phase: sess.phase,
-        connected: sess.phase === 'online',
-        loggingIn: sess.phase === 'connecting',
-        username: sess.bot?.username,
-        health: sess.bot?.health,
-        food: sess.bot?.food,
-        position: sess.bot?.entity?.position,
-        attempt: sess.attempt,
-        reconnectInMs: sess.phase === 'waiting' && sess.reconnectAt ? Math.max(0, sess.reconnectAt - Date.now()) : 0,
-        lastError: sess.lastError
-      }
-      if (sess.pendingMsaCode) {
-        status.msa_code = {
-          userCode: sess.pendingMsaCode.userCode,
-          verificationUri: sess.pendingMsaCode.verificationUri,
-          message: sess.pendingMsaCode.message
-        }
-      }
-      return json(200, status)
+        status: statusOf(sess),
+        logs: sess.logBuffer.filter(e => e.seq > logAfter),
+        msgs: sess.chatBuffer.filter(c => c.seq > chatAfter)
+      })
     }
 
     if (action === 'logs') {
@@ -305,6 +297,31 @@ function startBridgeServer() {
 }
 
 // ============ BOT ============
+// Shared shape for /status and the merged /poll (single source of truth).
+function statusOf(sess) {
+  const status = {
+    ok: true,
+    active: sess.sessionActive,
+    phase: sess.phase,
+    connected: sess.phase === 'online',
+    loggingIn: sess.phase === 'connecting',
+    username: sess.bot?.username,
+    health: sess.bot?.health,
+    food: sess.bot?.food,
+    position: sess.bot?.entity?.position,
+    attempt: sess.attempt,
+    reconnectInMs: sess.phase === 'waiting' && sess.reconnectAt ? Math.max(0, sess.reconnectAt - Date.now()) : 0,
+    lastError: sess.lastError
+  }
+  if (sess.pendingMsaCode) {
+    status.msa_code = {
+      userCode: sess.pendingMsaCode.userCode,
+      verificationUri: sess.pendingMsaCode.verificationUri,
+      message: sess.pendingMsaCode.message
+    }
+  }
+  return status
+}
 // NOTE: never call removeAllListeners() here — that would remove mineflayer's
 // own internal `bot.on('end', cleanup)` (plugins/physics.js) and leak the
 // 50 ms physics setInterval plus the whole old bot on every Stop/reconnect.
@@ -387,6 +404,17 @@ function createBot(sess) {
   // Safe: same packet mineflayer always writes at login (settings.js).
   opts.chat = sess.config.chatMode === 'commandsOnly' ? 'commandsOnly'
     : sess.config.chatMode === 'hidden' ? 'disabled' : 'enabled'
+
+  // Unused mineflayer plugins are disabled so they never parse packets.
+  // Kept: physics, entities, blocks, chat, health, game, inventory,
+  // settings, time, resource_pack (+ always-on core: kick, spawn_point...).
+  opts.plugins = {
+    bed: false, book: false, boss_bar: false, command_block: false,
+    craft: false, creative: false, enchantment_table: false, fishing: false,
+    furnace: false, rain: false, scoreboard: false, team: false,
+    tablist: false, title: false, villager: false, anvil: false,
+    sound: false, particle: false
+  }
 
   if (sess.config.auth === 'microsoft' && sess.config.accessToken) {
     opts.accessToken = sess.config.accessToken
