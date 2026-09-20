@@ -234,7 +234,13 @@ private fun AfkApp(dark: Boolean, onToggleDark: (Boolean) -> Unit) {
                                 Icon(Icons.Default.Menu, contentDescription = "Menu")
                             }
                         } else {
-                            IconButton(onClick = { selectedId = null }) {
+                            IconButton(
+                                onClick = { selectedId = null },
+                                // Center-align with the server settings gear
+                                // below: TopAppBar actions end 4 dp from the
+                                // edge, the gear ends 16+16 dp in.
+                                modifier = Modifier.padding(end = 28.dp),
+                            ) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                             }
                         }
@@ -954,7 +960,7 @@ private fun SessionScreen(
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.Center,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Button(
@@ -974,18 +980,18 @@ private fun SessionScreen(
                     Text(" Start")
                 }
                 Button(
+                    onClick = { session.reconnect() },
+                    enabled = state != "disconnected",
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = "Reconnect now")
+                }
+                Button(
                     onClick = { session.stop() },
                     enabled = state != "disconnected",
                 ) {
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Text(" Stop")
-                }
-                OutlinedButton(
-                    onClick = { session.reconnect() },
-                    enabled = state != "disconnected",
-                ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null)
-                    Text(" Reconnect now")
                 }
             }
 
