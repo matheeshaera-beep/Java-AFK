@@ -1,4 +1,4 @@
-# Java AFK v2.3
+# Java AFK v2.4
 
 Android app that keeps your Minecraft **Java Edition** account online (AFK) on any
 server — backed by [mineflayer](https://github.com/PrismarineJS/mineflayer)
@@ -14,9 +14,15 @@ for headless/CLI use.
 - **Up to 5 bots at once**, each with its own session screen.
 - **Live connection stages** — bridge boot → connecting → authenticating →
   logging in → connected, with an "Online as X · auth · host:port" summary.
-- **Live logs + chat** — bridge log stream, per-server chat send/receive.
+- **Live logs + chat** — bridge log stream, per-server chat send/receive
+  (keyboard Send key and arrow share one send path; own messages echo as
+  `<You>`; bot errors stay in the Log tab, never as `<null>` chat lines).
 - **AFK timer + data usage** — per-server counters that reset on Stop.
-- **Health + hunger** logged when they change (5-minute heartbeat otherwise).
+- **Health + hunger every 30 s** — logged on spawn and then every 30 seconds
+  while connected (damage/heal shows promptly, rate-limited against spam).
+- **Quiet window log** — server lobby menus that open/close with nothing
+  visible collapse into single lines (`Window closed ×17`) instead of floods;
+  real menus log their title, type, slots and items.
 - **Foreground service** — persistent notification shows the running server(s)
   with a force-stop action; per-server wake lock.
 - **Resource monitor** — CPU / RAM drawer panel, dark mode.
@@ -24,7 +30,7 @@ for headless/CLI use.
 ## How to use
 
 1. Install the APK from the
-   [v2.3 release](https://github.com/matheeshaera-beep/Java-AFK/releases/tag/v2.3).
+   [v2.4 release](https://github.com/matheeshaera-beep/Java-AFK/releases/tag/v2.4).
 2. Open the app, tap **+**, enter a server (e.g. Name `Donut SMP`,
    Host `donutsmp.net`, Port `25565`).
 3. Open the server, tap **Start**.
@@ -56,6 +62,16 @@ Tips:
   data — watch the drawer usage panel); a sixth Start is refused with a message.
 - Stopping the last server releases the wake lock and stops the service, so
   the phone sleeps normally with zero bots.
+- Chat tab: the input stays above the keyboard (edge-to-edge + IME insets),
+  grows to 5 lines, and both the keyboard Send key and the arrow send.
+  `commandsOnly`/`Hidden` only limit *incoming* chat — your Send always works.
+
+## Screenshots
+
+![Session log](Screenshots/session-log.png)
+![Chat tab](Screenshots/chat-tab.png)
+![Server settings](Screenshots/server-settings.png)
+![Server list and Add server](Screenshots/server-list-add.png)
 
 ## Supported devices
 
