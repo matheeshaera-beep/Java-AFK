@@ -24,7 +24,7 @@ for headless/CLI use.
 ## How to use
 
 1. Install the APK from the
-   [v2.1 release](https://github.com/matheeshaera-beep/java-afk-app/releases/tag/v2.1).
+   [v2.2 release](https://github.com/matheeshaera-beep/Java-AFK/releases/tag/v2.2).
 2. Open the app, tap **+**, enter a server (e.g. Name `Donut SMP`,
    Host `donutsmp.net`, Port `25565`).
 3. Open the server, tap **Start**.
