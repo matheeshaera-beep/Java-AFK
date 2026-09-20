@@ -15,6 +15,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
@@ -30,8 +31,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
@@ -118,7 +120,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -156,6 +157,10 @@ class MainActivity : ComponentActivity() {
         AppGraph.init(applicationContext)
         AppGraph.setContext(applicationContext)
         requestRuntimePermissions()
+        // Target SDK 35+ enforces edge-to-edge: adjustResize no longer moves
+        // content, so the keyboard would cover the chat input. Opt in here
+        // and handle the IME inset in Compose (single imePadding, SessionScreen).
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
             val systemDark = isSystemInDarkTheme()
@@ -973,7 +978,6 @@ private fun SessionScreen(
     val activeCount by AppGraph.activeCount.collectAsState(initial = 0)
     var kickedCount by remember { mutableIntStateOf(0) }
     var chatInput by remember { mutableStateOf("") }
-    var chatInputFocused by remember { mutableStateOf(false) }
     var showChat by remember { mutableStateOf(false) }
     var showSettings by remember(serverId) { mutableStateOf(false) }
     // Session-owned counters: keep ticking while connected even when this
@@ -1004,6 +1008,15 @@ private fun SessionScreen(
     }
     LaunchedEffect(atBottom) {
         if (atBottom) followNewest = true
+    }
+    // Keyboard opened: jump to the newest message so it stays visible above
+    // the keyboard. Visibility only — no keyboard height is tracked anywhere.
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(imeVisible) {
+        if (imeVisible && showChat && itemCount > 0) {
+            followNewest = true
+            listState.scrollToItem(itemCount - 1)
+        }
     }
 
     // Chat is pulled in the session poll loop even with the tab closed; this
@@ -1051,13 +1064,11 @@ private fun SessionScreen(
                 if (state == "connected") MaterialTheme.colorScheme.primary
                 else if (state == "connecting" || state == "authenticating" || state == "reconnecting") MaterialTheme.colorScheme.tertiary
                 else MaterialTheme.colorScheme.onSurfaceVariant
-            // Header/controls scroll only while typing (bounded share, so the
-            // shrunken window can't push the input off-screen). Otherwise the
-            // region wraps its content: a bounded verticalScroll would fill
-            // the whole share and leave a dead gap under short headers.
+            // Header + buttons wrap their content and scroll if the window
+            // gets short. The log/chat panel below owns weight(1f) plus the
+            // single imePadding, so the input can never be pushed off-screen.
             Column(
                 Modifier
-                    .then(if (chatInputFocused) Modifier.weight(1f, fill = false) else Modifier)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1243,9 +1254,14 @@ private fun SessionScreen(
                 }
             }
 
+            // Chat tab = Column(fillMaxSize) { messages list (weight 1f);
+            // input row }. The ONE imePadding in this screen sits on the
+            // panel: the input always rests directly above the keyboard
+            // (gesture and 3-button nav alike), the list takes the rest, and
+            // with the keyboard closed the padding is 0 so the layout is
+            // exactly as before. No keyboard height is tracked manually.
             Card(
-                Modifier.fillMaxWidth().weight(1f)
-                    .heightIn(min = if (chatInputFocused) 0.dp else 200.dp),
+                Modifier.fillMaxWidth().weight(1f).imePadding(),
             ) {
                 Column(Modifier.fillMaxSize().padding(12.dp)) {
                     Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -1293,17 +1309,17 @@ private fun SessionScreen(
                     }
                     if (showChat) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.Bottom,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                         ) {
                             OutlinedTextField(
                                 value = chatInput,
                                 onValueChange = { chatInput = it },
-                                modifier = Modifier.weight(1f)
-                                    .onFocusChanged { chatInputFocused = it.isFocused },
+                                modifier = Modifier.weight(1f),
                                 label = { Text("Type a message or /command") },
-                                singleLine = true,
+                                minLines = 1,
+                                maxLines = 5,
                             )
                             IconButton(
                                 onClick = {
