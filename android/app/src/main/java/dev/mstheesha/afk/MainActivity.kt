@@ -970,42 +970,53 @@ private fun SessionScreen(
                 else MaterialTheme.colorScheme.onSurfaceVariant
             Card(Modifier.fillMaxWidth().animateContentSize()) {
                 Column(
-                    Modifier.fillMaxWidth().padding(16.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    // Name is centered in the full card width (gear overlays the
-                    // right edge) so it stays exactly centered.
+                    // Header group: title, status and detail stacked tightly
+                    // and centered. The gear overlays the top-right corner so
+                    // it never pushes the title off-center.
                     Box(Modifier.fillMaxWidth()) {
-                        Text(
-                            srv.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.fillMaxWidth(),
-                            textAlign = TextAlign.Center,
-                        )
+                        Column(
+                            Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Text(
+                                srv.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                textAlign = TextAlign.Center,
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(statusDotColor),
+                                )
+                                Text(
+                                    "Status: ${stateLabel(state)}",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            }
+                            if (detail.isNotBlank()) {
+                                Text(
+                                    detail,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = { showSettings = true },
-                            modifier = Modifier.align(Alignment.CenterEnd),
+                            modifier = Modifier.align(Alignment.TopEnd),
                         ) {
                             Icon(Icons.Default.Settings, contentDescription = "Server settings")
                         }
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Box(
-                            Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(statusDotColor),
-                        )
-                        Text(
-                            "Status: ${stateLabel(state)}",
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                    }
-                    if (detail.isNotBlank()) {
-                        Text(detail, style = MaterialTheme.typography.bodySmall)
                     }
                     HorizontalDivider()
                     Row(
