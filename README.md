@@ -91,11 +91,9 @@ Notes for developers:
 - `engine/` is the standalone Bedrock client (RakNet handshake, Xbox auth,
   spawn, keep-alive, reconnect policy); `cmd/afkcli` is its CLI.
 
-## Donate
+## Donate 
 
-If this app keeps your farms chunk-loaded, consider supporting it:
-
-**[buymeacoffee.com/matheeshaex](https://buymeacoffee.com/matheeshaex)**
+☕ **[buymeacoffee.com/matheeshaex](https://buymeacoffee.com/matheeshaex)**
 
 ## License
 
