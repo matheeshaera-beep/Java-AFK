@@ -29,6 +29,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
@@ -843,6 +845,29 @@ private fun SessionScreen(
     val scope = rememberCoroutineScope()
     val canStart = state == "disconnected" || state == "error"
 
+    // Follow-newest log/chat: sticks to the tail on new lines, releases when
+    // the user scrolls up, re-engages at the bottom or via the jump button.
+    val listState = rememberLazyListState()
+    var followNewest by remember { mutableStateOf(true) }
+    LaunchedEffect(showChat) { followNewest = true }
+    val itemCount = if (showChat) chat.size else logs.size
+    LaunchedEffect(itemCount, followNewest) {
+        if (followNewest && itemCount > 0) listState.scrollToItem(itemCount - 1)
+    }
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last != null && last.index == info.totalItemsCount - 1
+        }
+    }
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress && !atBottom) followNewest = false
+    }
+    LaunchedEffect(atBottom) {
+        if (atBottom) followNewest = true
+    }
+
     // Only poll the localbridge for chat while the chat tab is open (no data waste).
     LaunchedEffect(showChat) {
         session.setChatPolling(showChat)
@@ -988,52 +1013,56 @@ private fun SessionScreen(
                 }
             }
 
-            Card(Modifier.fillMaxWidth().weight(1f)) {
-                // LazyColumn is the scroll workhorse: item-based, reliably
-                // finger-scrollable and accessibility-visible. The input row
-                // overlays the bottom; bottom padding reserves its space.
-                Box(Modifier.fillMaxSize().padding(12.dp)) {
-                    val listState = rememberLazyListState()
-                    LazyColumn(
-                        Modifier
-                            .fillMaxSize()
-                            .padding(bottom = if (showChat) 76.dp else 0.dp),
-                        state = listState,
-                    ) {
-                        if (showChat) {
-                            items(chat.takeLast(40)) { line ->
-                                val sender = line.sender?.let { "<$it> " } ?: ""
-                                val color = when (line.type) {
-                                    "chat" -> MaterialTheme.colorScheme.onSurface
-                                    "system" -> MaterialTheme.colorScheme.tertiary
-                                    "whisper" -> MaterialTheme.colorScheme.secondary
-                                    "error" -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+            Card(Modifier.fillMaxWidth().weight(1f).heightIn(min = 200.dp)) {
+                Column(Modifier.fillMaxSize().padding(12.dp).imePadding()) {
+                    Box(Modifier.fillMaxWidth().weight(1f)) {
+                        LazyColumn(
+                            Modifier.fillMaxSize(),
+                            state = listState,
+                        ) {
+                            if (showChat) {
+                                items(chat, key = { "${it.seq}:${it.ts}:${it.text.hashCode()}" }) { line ->
+                                    val sender = line.sender?.let { "<$it> " } ?: ""
+                                    val color = when (line.type) {
+                                        "chat" -> MaterialTheme.colorScheme.onSurface
+                                        "system" -> MaterialTheme.colorScheme.tertiary
+                                        "whisper" -> MaterialTheme.colorScheme.secondary
+                                        "error" -> MaterialTheme.colorScheme.error
+                                        "out" -> MaterialTheme.colorScheme.primary
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                    Text(
+                                        "$sender${line.text}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = color,
+                                    )
                                 }
-                                Text(
-                                    "$sender${line.text}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = color,
-                                )
+                            } else {
+                                items(logs, key = { it.id }) { line ->
+                                    Text(
+                                        line.text,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                    )
+                                }
                             }
-                        } else {
-                            items(logs.takeLast(40)) { line ->
-                                Text(
-                                    line,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
-                                )
-                            }
+                        }
+                        if (!followNewest && itemCount > 0) {
+                            TextButton(
+                                onClick = {
+                                    followNewest = true
+                                    scope.launch { listState.scrollToItem(itemCount - 1) }
+                                },
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                            ) { Text("Jump to latest") }
                         }
                     }
                     if (showChat) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
                             OutlinedTextField(
                                 value = chatInput,

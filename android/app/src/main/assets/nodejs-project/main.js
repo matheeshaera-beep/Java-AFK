@@ -10,8 +10,8 @@ const DEFAULT_AUTH = 'offline'
 const BRIDGE_PORT = 3001 // shifted from 3000: old manual install (dev.mstheesha.afk) owns 3000 while running
 const MAX_BODY = 1024 * 64 // 64 KB max bridge request body
 const MAX_BOTS = 2 // hard limit: max 2 concurrent servers/bots
-const MAX_CHAT = 300 // ring buffer of chat messages per server
-const MAX_LOGS = 200 // ring buffer of log lines per server
+const MAX_CHAT = 500 // ring buffer of chat messages per server
+const MAX_LOGS = 500 // ring buffer of log lines per server
 const MAX_SAVE_CHAR = 0 // placeholder to keep fs usage intentional
 const BOT_VERSION = '2.1'
 
@@ -62,7 +62,8 @@ function newSession(serverId) {
     stableTimer: null,
     reconnectTimer: null,
     pendingMsaCode: null,
-    logBuffer: [],
+    logBuffer: [], // entries: {seq, text}; seq from logSeq, monotonic per session
+    logSeq: 0,
     chatBuffer: [],
     chatSeq: 0
   }
@@ -77,7 +78,7 @@ function dayTime() {
 function sessionLog(sess, msg) {
   try {
     const line = dayTime() + ' ' + String(msg)
-    sess.logBuffer.push(line)
+    sess.logBuffer.push({ seq: ++sess.logSeq, text: line })
     if (sess.logBuffer.length > MAX_LOGS) sess.logBuffer.shift()
     origLog('[' + sess.serverId + ']', msg)
   } catch (e) {}
@@ -280,7 +281,8 @@ function startBridgeServer() {
     }
 
     if (action === 'logs') {
-      return json(200, { ok: true, logs: sess.logBuffer })
+      const after = parseInt(url.searchParams.get('after') || '0', 10)
+      return json(200, { ok: true, logs: sess.logBuffer.filter(e => e.seq > after) })
     }
 
     if (action === 'chat' && req.method === 'GET') {

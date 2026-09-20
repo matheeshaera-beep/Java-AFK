@@ -30,7 +30,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
 
     private val _state = MutableStateFlow("disconnected")
     private val _detail = MutableStateFlow("")
-    private val _logs = MutableStateFlow<List<String>>(emptyList())
+    private val _logs = MutableStateFlow<List<LogLine>>(emptyList())
     private val _authRequired = MutableStateFlow<Pair<String, String>?>(null)
     private val _chat = MutableStateFlow<List<ChatLine>>(emptyList())
 
@@ -93,14 +93,27 @@ class ServerSession(private val context: Context, val serverId: Long) {
         val text: String,
     )
 
+    /** Stable unique id per line so LazyColumn can key items (no takeLast
+     *  window in the UI, no jump on updates). Bridge lines use the bridge
+     *  seq; local-only lines use negative ids from [nextLocalLogId]. */
+    data class LogLine(val id: Long, val text: String)
+
+    private var nextLocalLogId = -1L
+
     private fun pushLog(line: String) {
         val prev = _logs.value
-        _logs.value = (prev + line).takeLast(200)
+        _logs.value = (prev + LogLine(nextLocalLogId--, line)).takeLast(500)
+    }
+
+    private fun pushBridgeLog(seq: Long, line: String) {
+        val prev = _logs.value
+        _logs.value = (prev + LogLine(seq, line)).takeLast(500)
+        if (seq > lastLogSeq) lastLogSeq = seq
     }
 
     private fun pushChat(seq: Int, ts: Long, type: String, sender: String?, text: String) {
         val prev = _chat.value
-        _chat.value = (prev + ChatLine(seq, ts, type, sender, text)).takeLast(300)
+        _chat.value = (prev + ChatLine(seq, ts, type, sender, text)).takeLast(500)
         if (seq > lastChatSeq) lastChatSeq = seq
     }
 
@@ -181,7 +194,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
         scope.launch {
             post("chat", JSONObject().put("message", message.trim()))
             val prev = _chat.value
-            _chat.value = (prev + ChatLine(++lastChatSeq, System.currentTimeMillis(), "chat", null, "> $message".trim())).takeLast(300)
+            _chat.value = (prev + ChatLine(++lastChatSeq, System.currentTimeMillis(), "chat", null, "> $message".trim())).takeLast(500)
         }
     }
 
@@ -256,31 +269,27 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
-    // Last bridge log line already shown. The bridge keeps a 200-line ring;
-    // polls run every 3s so rotation between polls is impossible in practice.
-    private var lastSeenLog: String? = null
+    // Bridge log cursor: the bridge numbers every entry (logSeq, monotonic
+    // per session) and /logs?after= returns only newer ones — one small
+    // incremental fetch instead of the full 500-line buffer every 3 s.
+    private var lastLogSeq = 0L
 
-    // Last time a hearts/hunger line was pushed (10s cadence, connected only).
+    // Last hearts/hunger values pushed to the log (health lines are logged
+    // only on change, or every 5 min as a heartbeat).
     private var lastHealthLogAt = 0L
+    private var lastLoggedHearts = Double.NaN
+    private var lastLoggedFood = -1
 
     /** Merges new lines from the bridge's per-session log buffer into the
      *  visible log. Without this the panel only ever showed local lines
      *  (e.g. "Stopped") while the bridge logged everything. */
     private fun pullLogs() {
-        val obj = get("logs") ?: return
+        val obj = get("logs?after=$lastLogSeq") ?: return
         val arr = obj.optJSONArray("logs") ?: return
-        val fresh = mutableListOf<String>()
-        for (i in 0 until arr.length()) fresh.add(arr.optString(i))
-        if (fresh.isEmpty()) return
-        val last = lastSeenLog
-        val unseen = if (last == null) {
-            fresh
-        } else {
-            val idx = fresh.indexOf(last)
-            if (idx < 0) fresh else fresh.subList(idx + 1, fresh.size)
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            pushBridgeLog(e.optLong("seq"), e.optString("text"))
         }
-        unseen.forEach { pushLog(it) }
-        lastSeenLog = fresh.last()
     }
 
     private suspend fun pollOnce() {
@@ -295,14 +304,20 @@ class ServerSession(private val context: Context, val serverId: Long) {
                         if (lastServerRef.isNotBlank()) append(" · $lastServerRef")
                     }
                     if (_authRequired.value != null) _authRequired.value = null
-                    // Hearts + hunger in the log every 10s while connected.
+                    // Hearts + hunger: log only when the values change, or
+                    // every 5 min as a heartbeat (the old 10 s line filled
+                    // the buffer and pushed out kicks/reconnects).
                     val now = System.currentTimeMillis()
-                    if (now - lastHealthLogAt > 10_000) {
-                        lastHealthLogAt = now
-                        val hp = status.optDouble("health", -1.0)
-                        val food = status.optInt("food", -1)
-                        if (hp >= 0 && food >= 0) {
-                            val hearts = hp / 2.0
+                    val hp = status.optDouble("health", -1.0)
+                    val food = status.optInt("food", -1)
+                    if (hp >= 0 && food >= 0) {
+                        val hearts = hp / 2.0
+                        if (hearts != lastLoggedHearts || food != lastLoggedFood ||
+                            now - lastHealthLogAt > 300_000
+                        ) {
+                            lastHealthLogAt = now
+                            lastLoggedHearts = hearts
+                            lastLoggedFood = food
                             val heartsStr =
                                 if (hearts % 1.0 == 0.0) hearts.toInt().toString()
                                 else "%.1f".format(hearts)
