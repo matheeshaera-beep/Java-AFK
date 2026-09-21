@@ -66,12 +66,15 @@ Tips:
   grows to 5 lines, and both the keyboard Send key and the arrow send.
   `commandsOnly`/`Hidden` only limit *incoming* chat — your Send always works.
 
-## Screenshots
+### Screenshots
 
-![Session log](Screenshots/session-log.png)
-![Chat tab](Screenshots/chat-tab.png)
-![Server settings](Screenshots/server-settings.png)
-![Server list and Add server](Screenshots/server-list-add.png)
+<p align="center">
+  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/session-log.png" width="23%" alt="Session log" />
+  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/chat-tab.png" width="23%" alt="Chat tab" />
+  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/server-settings.png" width="23%" alt="Server settings" />
+  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/server-list-add.png" width="23%" alt="Server list and Add server" />
+</p
+  >
 
 ## Supported devices
 
