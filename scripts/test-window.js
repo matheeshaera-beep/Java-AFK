@@ -36,6 +36,9 @@ async function main() {
   const diamondId = mcData.itemsByName['diamond'].id
   const ironId = mcData.itemsByName['iron_ingot'].id
   console.log('item ids: diamond=' + diamondId + ' iron_ingot=' + ironId)
+  const fillerName = ['black_stained_glass_pane', 'glass_pane', 'stone'].find(n => mcData.itemsByName[n])
+  const fillerId = mcData.itemsByName[fillerName].id
+  console.log('filler: ' + fillerName + '(' + fillerId + ')')
   const log = { lines: [] }
   const bridge = spawn(process.execPath, [MAIN_JS], { stdio: ['ignore', 'pipe', 'pipe'] })
   bridge.stdout.on('data', d => d.toString().split('\n').forEach(l => { l = l.trim(); if (l) log.lines.push(l) }))
@@ -118,6 +121,50 @@ async function main() {
     check('close-ack', closeRes.ok === true)
     check('close-reached-server', serverSawClose === true)
     check('window-null-after-close', afterClose.open === false, JSON.stringify(afterClose))
+
+    // filler menu: 20 identical panes + 3 distinct — bridge must pass ALL
+    // slots through ungrouped (collapsing is UI-side in the sheet)
+    const fSrv = mc.createServer({ 'online-mode': false, version: '1.21.1', port: 25584, host: '127.0.0.1' })
+    fSrv.on('playerJoin', (client) => {
+      client.write('login', {
+        entityId: 1, isHardcore: false,
+        worldNames: ['minecraft:overworld'], maxPlayers: 20,
+        viewDistance: 2, simulationDistance: 2,
+        reducedDebugInfo: false, enableRespawnScreen: true, doLimitedCrafting: false,
+        worldState: { dimension: 0, name: 'minecraft:overworld', hashedSeed: [0, 0], gamemode: 1, previousGamemode: 1, isDebug: false, isFlat: false, death: undefined, portalCooldown: 0 },
+        enforcesSecureChat: false
+      })
+      client.write('position', { x: 0, y: 80, z: 0, yaw: 0, pitch: 0, flags: {}, teleportId: 1 })
+      client.write('update_health', { health: 20, food: 20, foodSaturation: 5 })
+      setTimeout(() => {
+        try {
+          client.write('open_window', { windowId: 1, inventoryType: 2, windowTitle: nbt('Random Teleport') })
+          const items = []
+          for (let i = 0; i < 63; i++) items.push(emptySlot())
+          for (let i = 0; i < 20; i++) items[i] = fullSlot(fillerId, 1)
+          items[22] = fullSlot(diamondId, 1)
+          items[24] = fullSlot(ironId, 5)
+          items[26] = fullSlot(diamondId, 1)
+          setTimeout(() => {
+            try { client.write('window_items', { windowId: 1, stateId: 0, items, carriedItem: emptySlot() }) } catch (e) {}
+          }, 300)
+        } catch (e) {}
+      }, 1000)
+    })
+    await api('POST', '/servers/f/start', { host: '127.0.0.1', port: 25584, auth: 'offline', username: 'F' })
+    let fwin = null
+    for (let i = 0; i < 30; i++) {
+      await sleep(500)
+      fwin = await api('GET', '/servers/f/window')
+      if (fwin.open) break
+    }
+    const fillers = (fwin.slots || []).filter(s => s.slot < 20)
+    const distinct = (fwin.slots || []).filter(s => s.slot >= 20)
+    console.log('filler window slots: ' + fwin.slots.length + ' (fillers=' + fillers.length + ' distinct=' + distinct.length + ')')
+    check('filler-all-through', fwin.open && fwin.slots.length === 23, 'n=' + (fwin.slots || []).length)
+    check('filler-names', fillers.every(s => /glass|pane|stone/i.test(s.name)) && distinct.length === 3, JSON.stringify((fwin.slots || []).slice(-3)))
+    await api('POST', '/servers/f/stop', {})
+    fSrv.close()
     await api('POST', '/servers/w/stop', {})
   } finally {
     srv.close()

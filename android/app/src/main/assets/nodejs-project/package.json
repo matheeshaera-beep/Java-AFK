@@ -2,6 +2,9 @@
   "name": "java-afk-bot",
   "version": "1.0.0",
   "main": "main.js",
+  "scripts": {
+    "postinstall": "node -e \"const fs=require('fs'),path=require('path');const root=process.cwd();const rm=(rel)=>{try{const t=path.join(root,rel);if(fs.existsSync(t))fs.rmSync(t,{recursive:true,force:true})}catch(e){}};try{const bed=path.join(root,'node_modules/minecraft-data/minecraft-data/data/bedrock');for(const e of fs.readdirSync(bed)){if(e!=='common')rm('node_modules/minecraft-data/minecraft-data/data/bedrock/'+e)}}catch(e){}try{const CRUFT=['test','tests','doc','docs','maps','examples','example'];for(const m of fs.readdirSync(path.join(root,'node_modules'))){if(m.startsWith('.'))continue;const sub=m.startsWith('@')?fs.readdirSync(path.join(root,'node_modules',m)).map(s=>m+'/'+s):[m];for(const p of sub)for(const d of CRUFT)rm('node_modules/'+p+'/'+d)}}catch(e){}\""
+  },
   "dependencies": {
     "mineflayer": "^4.27.0",
     "prismarine-chat": "^1.7.1"

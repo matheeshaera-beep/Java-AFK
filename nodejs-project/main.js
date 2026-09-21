@@ -20,6 +20,17 @@ const CONNECT_TIMEOUT_MS = parseInt(process.env.AFK_CONNECT_TIMEOUT_MS || '60000
 const STABLE_MS = parseInt(process.env.AFK_STABLE_MS || '60000', 10)
 const BACKOFF_BASE_MS = parseInt(process.env.AFK_BACKOFF_BASE_MS || '5000', 10)
 const BACKOFF_CAP_MS = 300000 // 5 min
+// Hearts/hunger log cadence while connected and spawned (overridable by
+// env for tests). Logged once immediately on spawn, then on this interval
+// regardless of changes; on-change damage lines are rate-limited separately.
+const STATUS_LOG_INTERVAL_MS = parseInt(process.env.AFK_STATUS_LOG_MS || '30000', 10)
+const VITALS_EVENT_MIN_GAP_MS = 5000
+// Identical consecutive log lines inside this window collapse into one
+// line with a counter ("Window closed ×17") instead of flooding the log.
+const LOG_DEDUP_WINDOW_MS = 2000
+// Extra window diagnostics (windowOpen details + raw open/close packets).
+// Off by default; enable with AFK_DEBUG_WINDOWS=1.
+const DEBUG_WINDOWS = process.env.AFK_DEBUG_WINDOWS === '1'
 
 const origLog = console.log
 
@@ -61,9 +72,16 @@ function newSession(serverId) {
     connectTimer: null,
     stableTimer: null,
     reconnectTimer: null,
+    statusTimer: null, // 30s hearts/hunger log while spawned (single owner: spawn)
+    lastVitalsLogAt: 0,
     pendingMsaCode: null,
     logBuffer: [], // entries: {seq, text}; seq from logSeq, monotonic per session
     logSeq: 0,
+    // Flood-collapse state for sessionLog (last line + repeat counter).
+    lastLogMsg: null,
+    lastLogBase: null,
+    lastLogCount: 0,
+    lastLogAt: 0,
     chatBuffer: [],
     chatSeq: 0,
     window: null, // {title, slots:[{slot,name,count}]} while an inventory GUI is open
@@ -86,9 +104,25 @@ function dayTime() {
 
 function sessionLog(sess, msg) {
   try {
+    msg = String(msg)
+    const now = Date.now()
+    // Generic flood guard: an identical line repeated within a short window
+    // collapses into the previous entry with a counter, so no event
+    // (window closes, damage ticks, ...) can flood the log again.
+    if (sess.lastLogMsg === msg && (now - sess.lastLogAt) < LOG_DEDUP_WINDOW_MS && sess.logBuffer.length) {
+      sess.lastLogCount = (sess.lastLogCount || 1) + 1
+      sess.lastLogAt = now
+      sess.logBuffer[sess.logBuffer.length - 1].text = sess.lastLogBase + ' ×' + sess.lastLogCount
+      origLog('[' + sess.serverId + ']', msg + ' (×' + sess.lastLogCount + ')')
+      return
+    }
     const line = dayTime() + ' ' + String(msg)
     sess.logBuffer.push({ seq: ++sess.logSeq, text: line })
     if (sess.logBuffer.length > MAX_LOGS) sess.logBuffer.shift()
+    sess.lastLogMsg = msg
+    sess.lastLogBase = line
+    sess.lastLogCount = 1
+    sess.lastLogAt = now
     origLog('[' + sess.serverId + ']', msg)
   } catch (e) {}
 }
@@ -103,6 +137,36 @@ function pushChat(sess, type, sender, text) {
     text: String(text)
   })
   if (sess.chatBuffer.length > MAX_CHAT) sess.chatBuffer.shift()
+}
+
+// Hearts/hunger line. Same format the app has always shown:
+// "HH:mm:ss Hearts 10/10 · Hunger 20/20". Logged through sessionLog so it
+// shares the bridge clock and stays chronologically ordered with every
+// other line (the old Kotlin-side logging used the UI clock and could land
+// above older bridge lines).
+function logVitals(sess) {
+  try {
+    const bot = sess.bot
+    if (!bot || bot.health == null || bot.food == null) return
+    const hearts = bot.health / 2.0
+    const heartsStr = Number.isInteger(hearts) ? String(hearts) : hearts.toFixed(1)
+    sessionLog(sess, 'Hearts ' + heartsStr + '/10 · Hunger ' + bot.food + '/20')
+    sess.lastVitalsLogAt = Date.now()
+  } catch (e) {}
+}
+
+// Single owner is spawn (cleared on end/kick/error/stop/reconnect via
+// clearAllTimers/disposeBot), so reconnects can never stack duplicate
+// timers. Ticks often, logs at STATUS_LOG_INTERVAL_MS cadence.
+function startVitalsTimer(sess) {
+  clearTimer(sess, 'statusTimer')
+  sess.statusTimer = setInterval(() => {
+    try {
+      if (!sess.sessionActive || sess.phase !== 'online' || !sess.bot?.entity) return
+      if (Date.now() - (sess.lastVitalsLogAt || 0) < STATUS_LOG_INTERVAL_MS) return
+      logVitals(sess)
+    } catch (e) {}
+  }, Math.min(STATUS_LOG_INTERVAL_MS, 5000))
 }
 
 // mineflayer 4.39 hands `kicked` the raw packet.reason, which is an NBT
@@ -123,6 +187,7 @@ function clearAllTimers(sess) {
   clearTimer(sess, 'connectTimer')
   clearTimer(sess, 'stableTimer')
   clearTimer(sess, 'reconnectTimer')
+  clearTimer(sess, 'statusTimer')
 }
 
 // ============ BRIDGE SERVER (single, bound once per process) ============
@@ -254,17 +319,24 @@ function startBridgeServer() {
     if (action === 'chat' && req.method === 'POST') {
       return readBody(cmd => {
         if (typeof cmd === 'string') return json(400, { ok: false, error: cmd })
-        if (cmd.message && sess.bot?.entity) {
-          try {
-            const msg = String(cmd.message)
-            const isCommand = msg.startsWith('/')
-            if (isCommand || sess.config.chatMode !== 'commandsOnly') {
-              sess.bot.chat(msg)
-              // Echo only after a successful send (no invented seq — the
-              // bridge cursor advances here, Kotlin only follows it).
-              pushChat(sess, 'out', null, '> ' + msg)
-            }
-          } catch (e) { sessionLog(sess, 'chat error: ' + e.message) }
+        const msg = cmd.message != null ? String(cmd.message) : ''
+        if (!msg.trim()) return json(200, { ok: false, error: 'empty message' })
+        // No silent drops: tell the UI when there is no bot to send with
+        // (e.g. Disconnected) instead of answering ok:true and doing nothing.
+        if (!sess.bot?.entity) return json(200, { ok: false, error: 'Not connected' })
+        try {
+          // An explicit tap on Send always goes through — even for plain
+          // chat while chatMode is 'commandsOnly'. chatMode only governs
+          // which public chat the server forwards to us (incoming), never
+          // what the user deliberately sends. bot.chat() handles a leading
+          // '/' itself (sent whole, not split).
+          sess.bot.chat(msg)
+          // Echo only after a successful send (no invented seq — the
+          // bridge cursor advances here, Kotlin only follows it).
+          pushChat(sess, 'out', 'You', msg)
+        } catch (e) {
+          sessionLog(sess, 'chat error: ' + e.message)
+          return json(200, { ok: false, error: e.message })
         }
         return json(200, { ok: true })
       })
@@ -318,7 +390,8 @@ function startBridgeServer() {
       return json(200, { ok: true })
     }
 
-    if (action === 'window' && sub === 'click' && req.method === 'POST') {      return readBody(cmd => {
+    if (action === 'window' && sub === 'click' && req.method === 'POST') {
+      return readBody(cmd => {
         if (typeof cmd === 'string') return json(400, { ok: false, error: cmd })
         const slot = cmd.slot
         if (typeof slot !== 'number' || slot < 0) return json(400, { ok: false, error: 'slot must be a number' })
@@ -416,6 +489,7 @@ function disposeBot(sess) {
   const bot = sess.bot
   sess.bot = null
   sess.window = null
+  clearTimer(sess, 'statusTimer')
   if (!bot) return
   try { bot.on('error', () => {}) } catch (e) {}
   try { bot.quit('Session closed') } catch (e) {}
@@ -593,6 +667,11 @@ function createBot(sess) {
         }
       }, (sess.config.commandDelaySeconds || 5) * 1000)
     }
+    // Vitals: one line immediately on spawn, then every
+    // STATUS_LOG_INTERVAL_MS while spawned (single timer — re-created
+    // here each spawn, cleared on every down path).
+    logVitals(sess)
+    startVitalsTimer(sess)
   })
 
   // Chat capture — uses messages mineflayer already receives over the Minecraft
@@ -645,6 +724,16 @@ function createBot(sess) {
     }, 300)
   })
 
+  // On-change vitals (damage/heal shows promptly) but rate-limited so
+  // damage spam can't flood the log; the 30s timer covers the quiet case.
+  currentBot.on('health', () => {
+    if (currentBot !== sess.bot || sess.phase !== 'online') return
+    try {
+      if (Date.now() - (sess.lastVitalsLogAt || 0) < VITALS_EVENT_MIN_GAP_MS) return
+      logVitals(sess)
+    } catch (e) {}
+  })
+
   // Inventory GUI: snapshot title + non-empty slots (text only, no icons)
   // while a window is open; cleared on close (and on dispose/reconnect).
   const snapshotWindow = (window) => {
@@ -661,17 +750,50 @@ function createBot(sess) {
     let title = ''
     try { title = reasonText(currentBot, window.title) } catch (e) {}
     sess.window = { title, slots }
-    sessionLog(sess, 'Window opened: ' + (title || '(untitled)') + ' (' + slots.length + ' items)')
+    const names = slots.slice(0, 10).map(s => s.name + (s.count > 1 ? ' ×' + s.count : ''))
+    sessionLog(sess, 'Window opened: ' + (title || '(untitled)') +
+      ' (' + (window.type || '?') + ', ' + (window.slots || []).length + ' slots)' +
+      (names.length ? ' items: ' + names.join(', ') + (slots.length > 10 ? ', …' : '') : ''))
   }
 
   currentBot.on('windowOpen', (window) => {
     if (currentBot !== sess.bot) return
+    if (DEBUG_WINDOWS) {
+      try {
+        sessionLog(sess, 'dbg windowOpen: id=' + window.id + ' type=' + window.type +
+          ' title=' + reasonText(currentBot, window.title))
+      } catch (e) {}
+    }
     snapshotWindow(window)
   })
+
+  // Raw open/close packets (server-driven GUIs: lobby menus, selectors,
+  // verification screens). Debug only — off by default.
+  if (DEBUG_WINDOWS) {
+    const dbgPkt = (kind) => (pkt) => {
+      if (currentBot !== sess.bot) return
+      try {
+        let title = ''
+        try { title = reasonText(currentBot, pkt.windowTitle) } catch (e) {}
+        sessionLog(sess, 'dbg ' + kind + ': windowId=' + pkt.windowId +
+          (pkt.inventoryType != null ? ' type=' + pkt.inventoryType : '') +
+          (title ? ' title=' + title : ''))
+      } catch (e) {}
+    }
+    currentBot._client.on('open_window', dbgPkt('open_window'))
+    currentBot._client.on('close_window', dbgPkt('close_window'))
+  }
 
   currentBot.on('windowClose', (window) => {
     if (currentBot !== sess.bot) return
     sess.window = null
+    if (!window) {
+      // Server sent close_window with nothing open (lobby heartbeats,
+      // duplicate closes, subserver switches). Nothing happened — this is
+      // what used to flood the log ~17×/s on servers like Donut SMP.
+      if (DEBUG_WINDOWS) sessionLog(sess, 'Window close (nothing open)')
+      return
+    }
     sessionLog(sess, 'Window closed')
   })
 
@@ -679,7 +801,9 @@ function createBot(sess) {
     if (currentBot !== sess.bot) return
     const text = reasonText(currentBot, reason)
     sessionLog(sess, 'Kicked: ' + text)
-    pushChat(sess, 'error', null, 'Kicked: ' + text)
+    // Session notice, not an error dump: stays visible as a clearly-labeled
+    // system line. (Bot 'error' events below stay in the Log tab only.)
+    pushChat(sess, 'info', null, 'Kicked: ' + text)
     sess.pendingMsaCode = null
     if (/outdated|incompatible/i.test(text)) sess.version = null
     handleDown(sess, currentBot, text)
@@ -700,12 +824,13 @@ function createBot(sess) {
     // After spawn, packet-parse errors are not fatal (and socket errors are
     // always followed by 'end', which handles the retry). Before spawn an
     // auto-version ping failure emits only 'error', so it IS the down path.
+    // Either way the error lives in the Log tab only — never pushed as a
+    // chat line (that rendered as "<null> Error: ..." in the Chat tab).
     if (sess.phase === 'online') {
       sessionLog(sess, 'Error (ignored, still online): ' + msg)
       return
     }
     sessionLog(sess, 'Error: ' + msg)
-    pushChat(sess, 'error', null, 'Error: ' + msg)
     handleDown(sess, currentBot, msg)
   })
 }
@@ -723,5 +848,5 @@ if (require.main === module) {
   startBridgeServer()
   origLog('Java AFK Bot ready v' + BOT_VERSION + ' (single bridge on port ' + BRIDGE_PORT + ')')
 } else {
-  module.exports = { reasonText, sessions, newSession, scheduleReconnect, handleDown, createBot, disposeBot }
+  module.exports = { reasonText, sessions, newSession, scheduleReconnect, handleDown, createBot, disposeBot, sessionLog }
 }

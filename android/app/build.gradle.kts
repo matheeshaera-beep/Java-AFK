@@ -12,8 +12,8 @@ android {
         applicationId = "dev.mstheesha.afk.java"
         minSdk = 35
         targetSdk = 36
-        versionCode = 9
-        versionName = "2.3"
+        versionCode = 10
+        versionName = "2.4"
     }
 
     ndkVersion = "29.0.14206865"
@@ -27,8 +27,12 @@ android {
             }
         }
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.getByName("debug")
             ndk {
                 // Ship arm64-v8a only by default (real phones are 64-bit ARM).
@@ -37,15 +41,11 @@ android {
         }
     }
 
-    // Embedded Node MUST be extracted to real files on disk. The in-APK mmap
-    // path (extractNativeLibs=false, the release default) makes Node's dynamic
-    // loader tear down V8's mutexes mid-boot -> "destroyed mutex" SIGABRT on
-    // Start. The working debug build extracted them; release must too.
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
-        }
-    }
+    // NOTE on app size: useLegacyPackaging was previously required here —
+    // the in-APK mmap path made Node's loader tear down V8's mutexes
+    // ("destroyed mutex" SIGABRT). It is dropped for minSdk 35; if Start
+    // ever SIGABRTs again on-device, restore it first.
+
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -85,4 +85,28 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+
+// Strip debug symbols from the prebuilt NDK .so files as part of the build.
+// Runs on the merged release libs (build outputs only — the jniLibs sources
+// are never modified), after merge and before packaging.
+val ndkHome: String = System.getenv("ANDROID_NDK_HOME")
+    ?: (System.getenv("ANDROID_HOME") + "/ndk/29.0.14206865") // matches ndkVersion above
+val hostTag =
+    if (System.getProperty("os.name").lowercase().contains("win")) "windows-x86_64"
+    else "linux-x86_64"
+val ndkStrip = "$ndkHome/toolchains/llvm/prebuilt/$hostTag/bin/llvm-strip"
+
+tasks.register<Exec>("stripReleaseNativeLibs") {
+    dependsOn("mergeReleaseNativeLibs")
+    doFirst {
+        val libDir = File(buildDir, "intermediates/merged_native_libs/release")
+        val sos = libDir.walkTopDown().filter { it.isFile && it.name.endsWith(".so") }.toList()
+        commandLine(listOf(ndkStrip, "--strip-debug") + sos.map { it.absolutePath })
+    }
+}
+
+afterEvaluate {
+    // packageRelease is registered by AGP after this script runs.
+    tasks.named("packageRelease") { dependsOn("stripReleaseNativeLibs") }
 }

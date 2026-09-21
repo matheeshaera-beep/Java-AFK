@@ -58,6 +58,10 @@ class ServerSession(private val context: Context, val serverId: Long) {
     private var dataBaselineBytes = 0L
     private var connectedAtMs = 0L
     private var accumulatedMs = 0L
+    // True only between start() and stop(): without it the UID fallback
+    // below would report whole-app traffic (uidBytes() - 0) on a server
+    // that was never started — DATA USED growing while Disconnected.
+    private var hasDataBaseline = false
     // Per-bot byte total from the bridge (socket counters). TrafficStats is
     // per-UID, so it shows the same whole-app total on every server.
     private var bridgeDataBytes = -1L
@@ -83,7 +87,8 @@ class ServerSession(private val context: Context, val serverId: Long) {
         _afkSeconds.value = (accumulatedMs + extra) / 1000
         _sessionDataBytes.value =
             if (bridgeDataBytes >= 0) bridgeDataBytes
-            else (uidBytes() - dataBaselineBytes).coerceAtLeast(0L)
+            else if (hasDataBaseline) (uidBytes() - dataBaselineBytes).coerceAtLeast(0L)
+            else 0L
     }
 
     private fun uidBytes(): Long {
@@ -171,6 +176,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 _detail.value = "Starting local bridge…"
                 // Baseline for this session's data-usage counter.
                 dataBaselineBytes = uidBytes()
+                hasDataBaseline = true
                 _sessionDataBytes.value = 0
                 bridgeDataBytes = -1
                 // Fresh run: time restarts here (and on Stop). Drops and
@@ -222,6 +228,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
                 bridgeDataBytes = -1
+                hasDataBaseline = false
                 _window.value = null
                 pushLog("Stopped")
             }
@@ -242,13 +249,21 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
-    fun sendChat(message: String) {
+    fun sendChat(message: String, onError: (String) -> Unit = {}) {
         if (message.isBlank()) return
         scope.launch {
             // No local echo, no invented seq: the bridge appends an 'out'
             // line after a successful send and the cursor follows bridge
             // seqs only — echoing locally used to skip server messages.
-            post("chat", JSONObject().put("message", message.trim()))
+            val res = post("chat", JSONObject().put("message", message.trim()))
+            if (res == null) {
+                onError("Not connected")
+                return@launch
+            }
+            if (!res.optBoolean("ok", false)) {
+                onError(res.optString("error").ifBlank { "Not connected" })
+                return@launch
+            }
             try {
                 pullChat(true)
             } catch (e: Exception) {
@@ -290,7 +305,8 @@ class ServerSession(private val context: Context, val serverId: Long) {
         }
     }
 
-    fun clearToken() {        scope.launch {
+    fun clearToken() {
+        scope.launch {
             val authDir = File(context.filesDir, "minecraft-auth")
             if (authDir.exists()) authDir.deleteRecursively()
             val tokenFile = File(context.filesDir, "ms_token.json")
@@ -311,6 +327,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 _afkSeconds.value = 0
                 _sessionDataBytes.value = 0
                 bridgeDataBytes = -1
+                hasDataBaseline = false
                 _window.value = null
             }
         }
@@ -383,11 +400,12 @@ class ServerSession(private val context: Context, val serverId: Long) {
     // incremental fetch instead of the full 500-line buffer every 3 s.
     private var lastLogSeq = 0L
 
-    // Last hearts/hunger values pushed to the log (health lines are logged
-    // only on change, or every 5 min as a heartbeat).
-    private var lastHealthLogAt = 0L
-    private var lastLoggedHearts = Double.NaN
-    private var lastLoggedFood = -1
+    /** Bridge chat entries carry sender:null as JSON null, which
+     *  JSONObject.optString() reads back as the literal string "null".
+     *  Map both that and blank to a real null so the UI never renders
+     *  "<null>". */
+    private fun cleanSender(raw: String?): String? =
+        raw?.takeIf { it.isNotBlank() && it != "null" }
 
     /** ONE bridge request per cycle: status + new logs + new chat (replaces
      *  the old 2-request status+logs loop plus the tab-gated chat pull). */
@@ -409,7 +427,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     m.optInt("seq"),
                     m.optLong("ts"),
                     m.optString("type", "chat"),
-                    m.optString("sender").ifBlank { null },
+                    cleanSender(m.optString("sender")),
                     m.optString("text"),
                 )
             }
@@ -439,32 +457,10 @@ class ServerSession(private val context: Context, val serverId: Long) {
                         if (lastServerRef.isNotBlank()) append(" · $lastServerRef")
                     }
                     if (_authRequired.value != null) _authRequired.value = null
-                    // Hearts + hunger: log only when the values change, or
-                    // every 5 min as a heartbeat (the old 10 s line filled
-                    // the buffer and pushed out kicks/reconnects).
-                    val now = System.currentTimeMillis()
-                    val hp = status.optDouble("health", -1.0)
-                    val food = status.optInt("food", -1)
-                    if (hp >= 0 && food >= 0) {
-                        val hearts = hp / 2.0
-                        if (hearts != lastLoggedHearts || food != lastLoggedFood ||
-                            now - lastHealthLogAt > 300_000
-                        ) {
-                            lastHealthLogAt = now
-                            lastLoggedHearts = hearts
-                            lastLoggedFood = food
-                            val heartsStr =
-                                if (hearts % 1.0 == 0.0) hearts.toInt().toString()
-                                else "%.1f".format(hearts)
-                            val cal = java.util.Calendar.getInstance()
-                            val clock = "%02d:%02d:%02d".format(
-                                cal.get(java.util.Calendar.HOUR_OF_DAY),
-                                cal.get(java.util.Calendar.MINUTE),
-                                cal.get(java.util.Calendar.SECOND),
-                            )
-                            pushLog("$clock Hearts $heartsStr/10 · Hunger $food/20")
-                        }
-                    }
+                    // Hearts/hunger lines are logged bridge-side (main.js:
+                    // once on spawn, then every 30s, damage rate-limited) so
+                    // they share the bridge clock and stay chronological.
+                    // The status poll here only feeds live counters/display.
                 }
                 status.has("msa_code") -> {
                     val msa = status.optJSONObject("msa_code")
@@ -538,7 +534,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                         m.optInt("seq"),
                         m.optLong("ts"),
                         m.optString("type", "chat"),
-                        m.optString("sender").ifBlank { null },
+                        cleanSender(m.optString("sender")),
                         m.optString("text"),
                     )
                 }

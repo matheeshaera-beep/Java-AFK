@@ -15,6 +15,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
@@ -30,9 +31,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
@@ -124,7 +125,13 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -156,6 +163,10 @@ class MainActivity : ComponentActivity() {
         AppGraph.init(applicationContext)
         AppGraph.setContext(applicationContext)
         requestRuntimePermissions()
+        // Target SDK 35+ enforces edge-to-edge: adjustResize no longer moves
+        // content, so the keyboard would cover the chat input. Opt in here
+        // and handle the IME inset in Compose (single imePadding, SessionScreen).
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
             val systemDark = isSystemInDarkTheme()
@@ -912,17 +923,24 @@ private fun ServerSettingsDialog(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     )
                 }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text("Public chat", style = MaterialTheme.typography.bodyLarge)
-                    Row {
-                        ChatModeChip("Enabled", "enabled", chatModeValue) { chatModeValue = "enabled" }
-                        ChatModeChip("Commands only", "commandsOnly", chatModeValue) { chatModeValue = "commandsOnly" }
-                        ChatModeChip("Hidden", "hidden", chatModeValue) { chatModeValue = "hidden" }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("Public chat", style = MaterialTheme.typography.bodyLarge)
+                        Row {
+                            ChatModeChip("Enabled", "enabled", chatModeValue) { chatModeValue = "enabled" }
+                            ChatModeChip("Commands only", "commandsOnly", chatModeValue) { chatModeValue = "commandsOnly" }
+                            ChatModeChip("Hidden", "hidden", chatModeValue) { chatModeValue = "hidden" }
+                        }
                     }
+                    Text(
+                        "Which incoming chat the server sends you. Your Send button always works.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 OutlinedTextField(
                     value = chatCommandText,
@@ -982,6 +1000,26 @@ private fun SessionScreen(
     val scope = rememberCoroutineScope()
     val canStart = state == "disconnected" || state == "error"
 
+    // Single send path for the keyboard Send key and the arrow button:
+    // trim, ignore blank, clear after sending, keep focus/keyboard open.
+    // Never fails silently: while Disconnected both show "Not connected".
+    val chatFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    fun sendChatMessage() {
+        val msg = chatInput.trim()
+        if (msg.isBlank()) return
+        if (state != "connected") {
+            scope.launch { snackbarHostState.showSnackbar("Not connected") }
+            return
+        }
+        session.sendChat(msg) { err ->
+            scope.launch { snackbarHostState.showSnackbar(err) }
+        }
+        chatInput = ""
+        chatFocusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
     // Follow-newest log/chat: sticks to the tail on new lines, releases when
     // the user scrolls up, re-engages at the bottom or via the jump button.
     val listState = rememberLazyListState()
@@ -1003,6 +1041,15 @@ private fun SessionScreen(
     }
     LaunchedEffect(atBottom) {
         if (atBottom) followNewest = true
+    }
+    // Keyboard opened: jump to the newest message so it stays visible above
+    // the keyboard. Visibility only — no keyboard height is tracked anywhere.
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(imeVisible) {
+        if (imeVisible && showChat && itemCount > 0) {
+            followNewest = true
+            listState.scrollToItem(itemCount - 1)
+        }
     }
 
     // Chat is pulled in the session poll loop even with the tab closed; this
@@ -1037,17 +1084,9 @@ private fun SessionScreen(
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (server == null) {
-                Text("Select a server from the list first.")
-                return@Column
-            }
-
+        if (server == null) {
+            Text("Select a server from the list first.")
+        } else {
             val srv = server!!
 
             LaunchedEffect(srv.id, srv.name) {
@@ -1058,6 +1097,15 @@ private fun SessionScreen(
                 if (state == "connected") MaterialTheme.colorScheme.primary
                 else if (state == "connecting" || state == "authenticating" || state == "reconnecting") MaterialTheme.colorScheme.tertiary
                 else MaterialTheme.colorScheme.onSurfaceVariant
+            // Header + buttons wrap their content and scroll if the window
+            // gets short. The log/chat panel below owns weight(1f) plus the
+            // single imePadding, so the input can never be pushed off-screen.
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
             Card(Modifier.fillMaxWidth().animateContentSize()) {
                 Column(
                     Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -1203,6 +1251,7 @@ private fun SessionScreen(
                     Text(" Stop")
                 }
             }
+            }
         }
 
         server?.let { srvd ->
@@ -1238,8 +1287,16 @@ private fun SessionScreen(
                 }
             }
 
-            Card(Modifier.fillMaxWidth().weight(1f).heightIn(min = 200.dp)) {
-                Column(Modifier.fillMaxSize().padding(12.dp).imePadding()) {
+            // Chat tab = Column(fillMaxSize) { messages list (weight 1f);
+            // input row }. The ONE imePadding in this screen sits on the
+            // panel: the input always rests directly above the keyboard
+            // (gesture and 3-button nav alike), the list takes the rest, and
+            // with the keyboard closed the padding is 0 so the layout is
+            // exactly as before. No keyboard height is tracked manually.
+            Card(
+                Modifier.fillMaxWidth().weight(1f).imePadding(),
+            ) {
+                Column(Modifier.fillMaxSize().padding(12.dp)) {
                     Box(Modifier.fillMaxWidth().weight(1f)) {
                         LazyColumn(
                             Modifier.fillMaxSize(),
@@ -1247,7 +1304,9 @@ private fun SessionScreen(
                         ) {
                             if (showChat) {
                                 items(chat, key = { "${it.seq}:${it.ts}:${it.text.hashCode()}" }) { line ->
-                                    val sender = line.sender?.let { "<$it> " } ?: ""
+                                    // Belt and suspenders with cleanSender():
+                                    // a system line must never render "<null>".
+                                    val sender = line.sender?.takeIf { it != "null" }?.let { "<$it> " } ?: ""
                                     val color = when (line.type) {
                                         "chat" -> MaterialTheme.colorScheme.onSurface
                                         "system" -> MaterialTheme.colorScheme.tertiary
@@ -1285,27 +1344,26 @@ private fun SessionScreen(
                     }
                     if (showChat) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.Bottom,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                         ) {
                             OutlinedTextField(
                                 value = chatInput,
                                 onValueChange = { chatInput = it },
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier.weight(1f).focusRequester(chatFocusRequester),
                                 label = { Text("Type a message or /command") },
-                                singleLine = true,
+                                minLines = 1,
+                                maxLines = 5,
+                                keyboardOptions = KeyboardOptions(
+                                    imeAction = ImeAction.Send,
+                                    capitalization = KeyboardCapitalization.Sentences,
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onSend = { sendChatMessage() },
+                                ),
                             )
-                            IconButton(
-                                onClick = {
-                                    val msg = chatInput
-                                    if (msg.isNotBlank()) {
-                                        session.sendChat(msg)
-                                        chatInput = ""
-                                    }
-                                },
-                                enabled = state == "connected",
-                            ) {
+                            IconButton(onClick = { sendChatMessage() }) {
                                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                             }
                         }
@@ -1326,6 +1384,31 @@ private fun SessionScreen(
     }
     if (openWindow != null && !windowDismissed) {
         val w = openWindow!!
+        // Filler-dedup: slots repeating the same name+count more than twice
+        // collapse into one row ("+N more"); distinct items come first in
+        // slot order. Tapping a collapsed row clicks its first slot.
+        // Keyed on title so the toggle survives the 1 Hz re-polls.
+        var showAllSlots by remember(w.title) { mutableStateOf(false) }
+        val rows = remember(w.title, w.slots, showAllSlots) {
+            if (showAllSlots) {
+                w.slots.map { SlotRow(it.slot, it.name, it.count, 0) }
+            } else {
+                val groups = w.slots.groupBy { it.name to it.count }
+                val out = mutableListOf<SlotRow>()
+                w.slots
+                    .filter { s -> groups[s.name to s.count]!!.size <= 2 }
+                    .mapTo(out) { SlotRow(it.slot, it.name, it.count, 0) }
+                groups.values
+                    .filter { it.size > 2 }
+                    .sortedBy { g -> g.minOf { it.slot } }
+                    .mapTo(out) { g ->
+                        val first = g.minBy { it.slot }
+                        SlotRow(first.slot, first.name, first.count, g.size - 1)
+                    }
+                out
+            }
+        }
+        val collapsedCount = rows.sumOf { it.more }
         ModalBottomSheet(
             onDismissRequest = {
                 windowDismissed = true
@@ -1333,13 +1416,23 @@ private fun SessionScreen(
             },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            Text(
-                w.title,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    w.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (collapsedCount > 0 && !showAllSlots) {
+                    TextButton(onClick = { showAllSlots = true }) { Text("Show all") }
+                } else if (showAllSlots) {
+                    TextButton(onClick = { showAllSlots = false }) { Text("Show less") }
+                }
+            }
             LazyColumn {
-                items(w.slots, key = { it.slot }) { s ->
+                items(rows, key = { it.slot }) { s ->
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -1354,7 +1447,10 @@ private fun SessionScreen(
                             modifier = Modifier.weight(1f),
                         )
                         Text(
-                            "×${s.count}",
+                            buildString {
+                                append("×${s.count}")
+                                if (s.more > 0) append("  +${s.more} more")
+                            },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1396,8 +1492,10 @@ private fun SessionScreen(
     }
 }
 
-private fun formatAfkTime(totalSeconds: Long): String {
-    val h = totalSeconds / 3600
+/** One bottom-sheet row: a window slot plus collapsed duplicates (more). */
+private data class SlotRow(val slot: Int, val name: String, val count: Int, val more: Int)
+
+private fun formatAfkTime(totalSeconds: Long): String {    val h = totalSeconds / 3600
     val m = (totalSeconds % 3600) / 60
     val s = totalSeconds % 60
     return "%02d:%02d:%02d".format(h, m, s)
