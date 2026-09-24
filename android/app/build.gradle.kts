@@ -12,8 +12,8 @@ android {
         applicationId = "dev.mstheesha.afk.java"
         minSdk = 35
         targetSdk = 36
-        versionCode = 10
-        versionName = "2.4"
+        versionCode = 11
+        versionName = "2.5"
     }
 
     ndkVersion = "29.0.14206865"

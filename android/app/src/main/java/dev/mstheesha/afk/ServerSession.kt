@@ -101,8 +101,25 @@ class ServerSession(private val context: Context, val serverId: Long) {
     var kickedCount = 0
         private set
 
+    /** Cursor for the kick snackbar: survives navigation (unlike composable
+     *  remember state) so an old kick never replays on re-entry. */
+    @Volatile
+    var acknowledgedKickedCount = 0
+        private set
+
+    fun acknowledgeKick() {
+        acknowledgedKickedCount = kickedCount
+    }
+
     private var polling = AtomicBoolean(false)
     private var lastChatSeq = 0
+    // Guards the read-cursor/append path: pollMerged() (timer) and pullChat()
+    // (post-send refresh) run concurrently on Dispatchers.IO threads and
+    // would otherwise append the same bridge seq twice -> duplicate
+    // LazyColumn keys -> crash. Synchronized is enough (no suspend work
+    // inside pushChat); the session mutex is NOT used here so a slow poll
+    // fetch never blocks start()/stop().
+    private val chatLock = Any()
 
     // Stashed from the start() config for the "how it connected" summary.
     private var lastAuthLabel = ""
@@ -156,9 +173,17 @@ class ServerSession(private val context: Context, val serverId: Long) {
     }
 
     private fun pushChat(seq: Int, ts: Long, type: String, sender: String?, text: String) {
-        val prev = _chat.value
-        _chat.value = (prev + ChatLine(seq, ts, type, sender, text)).takeLast(500)
-        if (seq > lastChatSeq) lastChatSeq = seq
+        // Idempotent: bridge seq is monotonic per session, so a duplicate seq
+        // is always a re-delivery, never a distinct message. Guard on
+        // lastChatSeq (not the trimmed buffer tail) so takeLast(500) eviction
+        // can't re-admit an old seq. The whole check+append is atomic under
+        // chatLock so concurrent pollMerged/pullChat can't interleave.
+        synchronized(chatLock) {
+            if (seq <= lastChatSeq) return
+            val prev = _chat.value
+            _chat.value = (prev + ChatLine(seq, ts, type, sender, text)).takeLast(500)
+            lastChatSeq = seq
+        }
     }
 
     // ============ PUBLIC API ============
@@ -230,6 +255,7 @@ class ServerSession(private val context: Context, val serverId: Long) {
                 bridgeDataBytes = -1
                 hasDataBaseline = false
                 _window.value = null
+                acknowledgedKickedCount = kickedCount
                 pushLog("Stopped")
             }
         }
@@ -276,7 +302,15 @@ class ServerSession(private val context: Context, val serverId: Long) {
      *  delays, view distance). Without this, edits made while connected sit
      *  in the database until the next Stop/Start. Quiet: a down bridge just
      *  means the next Start carries the full config anyway. */
-    fun pushLiveConfig(chatCommand: String, delaySeconds: Int, viewDistance: Int, chatMode: String) {
+    fun pushLiveConfig(
+        chatCommand: String,
+        delaySeconds: Int,
+        viewDistance: Int,
+        chatMode: String,
+        loopEnabled: Boolean,
+        loopMessage: String,
+        loopDelaySeconds: Int,
+    ) {
         scope.launch {
             post(
                 "config",
@@ -284,7 +318,10 @@ class ServerSession(private val context: Context, val serverId: Long) {
                     .put("chatCommand", chatCommand)
                     .put("commandDelaySeconds", delaySeconds)
                     .put("viewDistance", viewDistance)
-                    .put("chatMode", chatMode),
+                    .put("chatMode", chatMode)
+                    .put("loopEnabled", loopEnabled)
+                    .put("loopMessage", loopMessage)
+                    .put("loopDelaySeconds", loopDelaySeconds),
                 quiet = true,
             )
         }

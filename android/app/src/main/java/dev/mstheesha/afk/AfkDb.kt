@@ -27,6 +27,9 @@ data class ServerEntity(
     val username: String = "",
     val viewDistance: Int = 2,
     val chatMode: String = "enabled", // enabled | commandsOnly | hidden
+    val loopEnabled: Boolean = false,
+    val loopMessage: String = "",
+    val loopDelaySeconds: Int = 30,
 )
 
 @Dao
@@ -47,7 +50,7 @@ interface ServerDao {
     suspend fun delete(server: ServerEntity)
 }
 
-@Database(entities = [ServerEntity::class], version = 5, exportSchema = false)
+@Database(entities = [ServerEntity::class], version = 6, exportSchema = false)
 abstract class AfkDatabase : RoomDatabase() {
     abstract fun serverDao(): ServerDao
 
@@ -79,13 +82,21 @@ abstract class AfkDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE servers ADD COLUMN loopEnabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE servers ADD COLUMN loopMessage TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE servers ADD COLUMN loopDelaySeconds INTEGER NOT NULL DEFAULT 30")
+            }
+        }
+
         fun get(context: Context): AfkDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext,
                     AfkDatabase::class.java,
                     "afk.db",
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build().also { instance = it }
             }
     }

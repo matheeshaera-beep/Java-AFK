@@ -27,6 +27,14 @@ object AppGraph {
     private val _namesTick = MutableStateFlow(0)
     val namesTick: Flow<Int> get() = _namesTick
 
+    // Last-known full entities, fed by list/drawer rows that already hold
+    // them. Seeds SessionScreen's first frame so re-entering a panel never
+    // flashes the null "Select a server" state while Room re-emits.
+    private val serverEntities = mutableMapOf<Long, ServerEntity>()
+    fun noteServerEntity(e: ServerEntity) = synchronized(sessions) { serverEntities[e.id] = e }
+    fun cachedServer(id: Long): ServerEntity? = synchronized(sessions) { serverEntities[id] }
+    fun forgetServer(id: Long) = synchronized(sessions) { serverEntities.remove(id) }
+
     /** Remembered from UI surfaces that know the entity (list rows, session). */
     fun noteServerName(id: Long, name: String) = synchronized(sessions) {
         if (serverNames[id] != name) {

@@ -111,7 +111,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -340,6 +339,9 @@ private fun DrawerContent(
             )
         } else {
             servers.forEach { server ->
+                LaunchedEffect(server) {
+                    AppGraph.noteServerEntity(server)
+                }
                 NavigationDrawerItem(
                     icon = {
                         ServerAvatar(
@@ -527,6 +529,7 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                         onEdit = { editing = server },
                         onDelete = {
                             AppGraph.removeSession(server.id)
+                            AppGraph.forgetServer(server.id)
                             scope.launch { dao.delete(server) }
                         },
                     )
@@ -588,6 +591,9 @@ private fun ServerListScreen(onSelect: (Long) -> Unit) {
                             username = ed.value.username.trim(),
                             viewDistance = ed.value.viewDistanceInt,
                             chatMode = ed.value.chatMode,
+                            loopEnabled = server.loopEnabled,
+                            loopMessage = server.loopMessage,
+                            loopDelaySeconds = server.loopDelaySeconds,
                         ),
                     )
                     editing = null
@@ -612,9 +618,13 @@ private fun ServerRow(
     onDelete: () -> Unit,
 ) {
     val session = remember(server.id) { AppGraph.sessionFor(server.id) }
-    // Feed the foreground notification's server-name list.
+    // Feed the foreground notification's server-name list, and the entity
+    // cache that seeds SessionScreen's first frame (no null flash).
     LaunchedEffect(server.id, server.name) {
         AppGraph.noteServerName(server.id, server.name)
+    }
+    LaunchedEffect(server) {
+        AppGraph.noteServerEntity(server)
     }
     val state by session.state.collectAsState()
     var showMenu by remember { mutableStateOf(false) }
@@ -763,10 +773,14 @@ private data class ServerDraft(
     val username: String = "",
     val viewDistance: String = "2",
     val chatMode: String = "enabled", // enabled | commandsOnly | hidden
+    val loopEnabled: Boolean = false,
+    val loopMessage: String = "",
+    val loopDelaySeconds: String = "30",
 ) {
     val portInt: Int get() = port.toIntOrNull()?.coerceIn(1, 65535) ?: 25565
     val delayInt: Int get() = commandDelaySeconds.toIntOrNull()?.coerceIn(0, 3600) ?: 5
     val viewDistanceInt: Int get() = viewDistance.toIntOrNull()?.coerceIn(2, 12) ?: 2
+    val loopDelayInt: Int get() = loopDelaySeconds.toIntOrNull()?.coerceIn(1, 3600) ?: 30
     val portValid: Boolean get() = port.toIntOrNull()?.let { it in 1..65535 } ?: false
 
     companion object {
@@ -780,6 +794,9 @@ private data class ServerDraft(
             username = s.username,
             viewDistance = s.viewDistance.toString(),
             chatMode = s.chatMode,
+            loopEnabled = s.loopEnabled,
+            loopMessage = s.loopMessage,
+            loopDelaySeconds = s.loopDelaySeconds.toString(),
         )
     }
 }
@@ -863,11 +880,23 @@ private fun ServerSettingsDialog(
     var delayText by remember(server.id) { mutableStateOf(server.commandDelaySeconds.toString()) }
     var viewDistanceText by remember(server.id) { mutableStateOf(server.viewDistance.toString()) }
     var chatModeValue by remember(server.id) { mutableStateOf(server.chatMode) }
+    var loopEnabledValue by remember(server.id) { mutableStateOf(server.loopEnabled) }
+    var loopMessageText by remember(server.id) { mutableStateOf(server.loopMessage) }
+    var loopDelayText by remember(server.id) { mutableStateOf(server.loopDelaySeconds.toString()) }
+    fun pushAll(
+        chatCommand: String = chatCommandText,
+        delay: Int = delayText.toIntOrNull() ?: server.commandDelaySeconds,
+        viewDistance: Int = viewDistanceText.toIntOrNull() ?: server.viewDistance,
+        chatMode: String = chatModeValue,
+        loopEnabled: Boolean = loopEnabledValue,
+        loopMessage: String = loopMessageText,
+        loopDelay: Int = loopDelayText.toIntOrNull() ?: server.loopDelaySeconds,
+    ) = session.pushLiveConfig(chatCommand, delay, viewDistance, chatMode, loopEnabled, loopMessage, loopDelay)
     LaunchedEffect(chatCommandText) {
         if (chatCommandText != server.chatCommand) {
             delay(600)
             dao.update(server.copy(chatCommand = chatCommandText))
-            session.pushLiveConfig(chatCommandText, delayText.toIntOrNull() ?: server.commandDelaySeconds, viewDistanceText.toIntOrNull() ?: server.viewDistance, chatModeValue)
+            pushAll(chatCommand = chatCommandText)
         }
     }
     LaunchedEffect(delayText) {
@@ -875,7 +904,7 @@ private fun ServerSettingsDialog(
         if (parsed != null && parsed != server.commandDelaySeconds) {
             delay(600)
             dao.update(server.copy(commandDelaySeconds = parsed))
-            session.pushLiveConfig(chatCommandText, parsed, viewDistanceText.toIntOrNull() ?: server.viewDistance, chatModeValue)
+            pushAll(delay = parsed)
         }
     }
     LaunchedEffect(viewDistanceText) {
@@ -883,14 +912,36 @@ private fun ServerSettingsDialog(
         if (parsed != null && parsed != server.viewDistance) {
             delay(600)
             dao.update(server.copy(viewDistance = parsed))
-            session.pushLiveConfig(chatCommandText, delayText.toIntOrNull() ?: server.commandDelaySeconds, parsed, chatModeValue)
+            pushAll(viewDistance = parsed)
         }
     }
     LaunchedEffect(chatModeValue) {
         if (chatModeValue != server.chatMode) {
             delay(600)
             dao.update(server.copy(chatMode = chatModeValue))
-            session.pushLiveConfig(chatCommandText, delayText.toIntOrNull() ?: server.commandDelaySeconds, viewDistanceText.toIntOrNull() ?: server.viewDistance, chatModeValue)
+            pushAll(chatMode = chatModeValue)
+        }
+    }
+    LaunchedEffect(loopEnabledValue) {
+        if (loopEnabledValue != server.loopEnabled) {
+            delay(600)
+            dao.update(server.copy(loopEnabled = loopEnabledValue))
+            pushAll(loopEnabled = loopEnabledValue)
+        }
+    }
+    LaunchedEffect(loopMessageText) {
+        if (loopMessageText != server.loopMessage) {
+            delay(600)
+            dao.update(server.copy(loopMessage = loopMessageText))
+            pushAll(loopMessage = loopMessageText)
+        }
+    }
+    LaunchedEffect(loopDelayText) {
+        val parsed = loopDelayText.toIntOrNull()
+        if (parsed != null && parsed != server.loopDelaySeconds) {
+            delay(600)
+            dao.update(server.copy(loopDelaySeconds = parsed))
+            pushAll(loopDelay = parsed)
         }
     }
     AlertDialog(
@@ -937,7 +988,7 @@ private fun ServerSettingsDialog(
                         }
                     }
                     Text(
-                        "Which incoming chat the server sends you. Your Send button always works.",
+                        "Which incoming chat the server sends you. Your Send button always works. Hidden filters most public chat, including plugin-formatted messages; server replies to your commands still show.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -946,7 +997,7 @@ private fun ServerSettingsDialog(
                     value = chatCommandText,
                     onValueChange = { chatCommandText = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Command sent after spawning") },
+                    label = { Text("Run once after spawn") },
                     singleLine = true,
                 )
                 OutlinedTextField(
@@ -954,6 +1005,38 @@ private fun ServerSettingsDialog(
                     onValueChange = { delayText = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Delay before command (seconds)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Loop a message", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "Repeats on its own delay, restarts after every reconnect.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = loopEnabledValue, onCheckedChange = { loopEnabledValue = it })
+                    }
+                }
+                OutlinedTextField(
+                    value = loopMessageText,
+                    onValueChange = { loopMessageText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Message or command to loop") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = loopDelayText,
+                    onValueChange = { loopDelayText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Repeat every (seconds)") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
@@ -980,7 +1063,7 @@ private fun SessionScreen(
     val dao = AppGraph.db.serverDao()
     val session = remember(serverId) { AppGraph.sessionFor(serverId) }
 
-    val server by dao.byId(serverId).collectAsState(initial = null)
+    val server by dao.byId(serverId).collectAsState(initial = remember(serverId) { AppGraph.cachedServer(serverId) })
 
     val state by session.state.collectAsState()
     val detail by session.detail.collectAsState()
@@ -989,7 +1072,6 @@ private fun SessionScreen(
     val authRequired by session.authRequired.collectAsState()
     val openWindow by session.window.collectAsState()
     val activeCount by AppGraph.activeCount.collectAsState(initial = 0)
-    var kickedCount by remember { mutableIntStateOf(0) }
     var chatInput by remember { mutableStateOf("") }
     var showChat by remember { mutableStateOf(false) }
     var showSettings by remember(serverId) { mutableStateOf(false) }
@@ -1072,10 +1154,10 @@ private fun SessionScreen(
     }
 
     LaunchedEffect(session.kickedCount) {
-        if (session.kickedCount > kickedCount) {
+        if (session.kickedCount > session.acknowledgedKickedCount) {
             snackbarHostState.showSnackbar("Kicked or disconnected: ${session.detail.value}")
+            session.acknowledgeKick()
         }
-        kickedCount = session.kickedCount
     }
 
     Column(
@@ -1303,7 +1385,7 @@ private fun SessionScreen(
                             state = listState,
                         ) {
                             if (showChat) {
-                                items(chat, key = { "${it.seq}:${it.ts}:${it.text.hashCode()}" }) { line ->
+                                items(chat, key = { it.seq }) { line ->
                                     // Belt and suspenders with cleanSender():
                                     // a system line must never render "<null>".
                                     val sender = line.sender?.takeIf { it != "null" }?.let { "<$it> " } ?: ""
@@ -1521,6 +1603,9 @@ private fun buildConfig(context: Context, server: ServerEntity): String =
         .put("username", server.username.ifBlank { "AFKBot" })
         .put("viewDistance", server.viewDistance.coerceIn(2, 12))
         .put("chatMode", if (server.chatMode in CALLABLE_CHAT_MODES) server.chatMode else "enabled")
+        .put("loopEnabled", server.loopEnabled)
+        .put("loopMessage", server.loopMessage)
+        .put("loopDelaySeconds", if (server.loopDelaySeconds > 0) server.loopDelaySeconds else 30)
         .put("profilesFolder", File(context.filesDir, "minecraft-auth").absolutePath)
         .toString()
 

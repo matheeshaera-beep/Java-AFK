@@ -21,8 +21,9 @@ const STABLE_MS = parseInt(process.env.AFK_STABLE_MS || '60000', 10)
 const BACKOFF_BASE_MS = parseInt(process.env.AFK_BACKOFF_BASE_MS || '5000', 10)
 const BACKOFF_CAP_MS = 300000 // 5 min
 // Hearts/hunger log cadence while connected and spawned (overridable by
-// env for tests). Logged once immediately on spawn, then on this interval
-// regardless of changes; on-change damage lines are rate-limited separately.
+// env for tests). Only logged when the values changed since the last logged
+// line (spawn logs once via a reset in createBot); on-change damage lines
+// are rate-limited separately.
 const STATUS_LOG_INTERVAL_MS = parseInt(process.env.AFK_STATUS_LOG_MS || '30000', 10)
 const VITALS_EVENT_MIN_GAP_MS = 5000
 // Identical consecutive log lines inside this window collapse into one
@@ -59,7 +60,10 @@ function newSession(serverId) {
       chatCommand: '',
       commandDelaySeconds: 5,
       viewDistance: 12,
-      chatMode: 'enabled'
+      chatMode: 'enabled',
+      loopEnabled: false,
+      loopMessage: '',
+      loopDelaySeconds: 30
     },
     bot: null,
     sessionActive: false,
@@ -73,7 +77,10 @@ function newSession(serverId) {
     stableTimer: null,
     reconnectTimer: null,
     statusTimer: null, // 30s hearts/hunger log while spawned (single owner: spawn)
+    loopTimer: null, // repeating loop-message chain (single owner: spawn)
     lastVitalsLogAt: 0,
+    lastVitalsHearts: null, // last logged values; the periodic line only
+    lastVitalsFood: null, // emits when something actually changed (#6)
     pendingMsaCode: null,
     logBuffer: [], // entries: {seq, text}; seq from logSeq, monotonic per session
     logSeq: 0,
@@ -150,6 +157,13 @@ function logVitals(sess) {
     if (!bot || bot.health == null || bot.food == null) return
     const hearts = bot.health / 2.0
     const heartsStr = Number.isInteger(hearts) ? String(hearts) : hearts.toFixed(1)
+    // AFK bots sit for hours: only log when values actually changed since
+    // the last logged line (the first call after spawn always logs, the
+    // previous values being null). Unchanged ticks stay silent instead of
+    // dripping a low-value line every 30 s and pushing real events out.
+    if (sess.lastVitalsHearts === heartsStr && sess.lastVitalsFood === bot.food) return
+    sess.lastVitalsHearts = heartsStr
+    sess.lastVitalsFood = bot.food
     sessionLog(sess, 'Hearts ' + heartsStr + '/10 · Hunger ' + bot.food + '/20')
     sess.lastVitalsLogAt = Date.now()
   } catch (e) {}
@@ -188,6 +202,25 @@ function clearAllTimers(sess) {
   clearTimer(sess, 'stableTimer')
   clearTimer(sess, 'reconnectTimer')
   clearTimer(sess, 'statusTimer')
+  clearTimer(sess, 'loopTimer')
+}
+
+// Repeating loop message: self-rescheduling setTimeout chain (not
+// setInterval) so the existing clearTimer/clearTimeout cleanup covers it.
+// Started fresh on every spawn; cleared on every down path via
+// clearAllTimers (disposeBot/createBot/stop) so reconnects can never stack
+// a second chain on top of the old one.
+function scheduleLoop(sess, bot) {
+  clearTimer(sess, 'loopTimer')
+  if (!sess.config.loopEnabled || !sess.config.loopMessage) return
+  const delayMs = Math.max(1, sess.config.loopDelaySeconds || 30) * 1000
+  sess.loopTimer = setTimeout(function tick() {
+    sess.loopTimer = null
+    if (bot !== sess.bot || sess.phase !== 'online') return
+    try { bot.chat(sess.config.loopMessage) } catch (e) {}
+    if (bot !== sess.bot || sess.phase !== 'online') return
+    sess.loopTimer = setTimeout(tick, delayMs)
+  }, delayMs)
 }
 
 // ============ BRIDGE SERVER (single, bound once per process) ============
@@ -312,6 +345,9 @@ function startBridgeServer() {
       return readBody(cmd => {
         if (typeof cmd === 'string') return json(400, { ok: false, error: cmd })
         sess.config = { ...sess.config, ...(cmd || {}) }
+        // Hot-apply loop toggles immediately when already online instead of
+        // waiting for the next reconnect (no-op unless spawned + online).
+        if (sess.phase === 'online' && sess.bot) scheduleLoop(sess, sess.bot)
         return json(200, { ok: true })
       })
     }
@@ -545,6 +581,9 @@ function createBot(sess) {
   // wedged the session whenever a failure happened before spawn).
   disposeBot(sess)
   clearAllTimers(sess)
+  // Fresh vitals baseline so the spawn-time line logs once per connection.
+  sess.lastVitalsHearts = null
+  sess.lastVitalsFood = null
   sess.phase = 'connecting'
 
   const opts = {
@@ -594,10 +633,14 @@ function createBot(sess) {
     }
   }
 
-  sessionLog(sess, 'Creating bot: ' + JSON.stringify({
-    host: opts.host, port: opts.port, auth: opts.auth, username: opts.username,
-    hasToken: !!opts.accessToken, chat: opts.chat
-  }))
+  // Concise user-facing line always; the full options dump is debug-only.
+  sessionLog(sess, 'Connecting to ' + opts.host + ':' + opts.port + ' as ' + opts.username)
+  if (DEBUG_WINDOWS) {
+    sessionLog(sess, 'dbg Creating bot: ' + JSON.stringify({
+      host: opts.host, port: opts.port, auth: opts.auth, username: opts.username,
+      hasToken: !!opts.accessToken, chat: opts.chat
+    }))
+  }
 
   let bot
   try {
@@ -667,6 +710,9 @@ function createBot(sess) {
         }
       }, (sess.config.commandDelaySeconds || 5) * 1000)
     }
+    // Independent repeating message ("keeps looping"): restarts cleanly on
+    // every spawn, never stacks (scheduleLoop clears the old chain first).
+    scheduleLoop(sess, currentBot)
     // Vitals: one line immediately on spawn, then every
     // STATUS_LOG_INTERVAL_MS while spawned (single timer — re-created
     // here each spawn, cleared on every down path).
@@ -683,8 +729,24 @@ function createBot(sess) {
     // SMP) would flood the buffer and push real chat out — never store it.
     if (position === 'game_info') return
     const type = CHAT_MAP[position] || (position === 'whisper' ? 'whisper' : 'info')
-    // "Hidden" filters normal public chat locally too (system/whisper/error stay).
-    if (type === 'chat' && sess.config.chatMode === 'hidden') return
+    // "Hidden" filters normal public chat locally too (whisper/direct replies
+    // stay). Plugin-formatted servers (Essentials/LuckPerms chat, join/leave
+    // broadcasts, advancements, pickup/stat lines) send position 1
+    // ("system") for exactly this content — vanilla clients can't filter
+    // position 1, so neither server-side suppression path touches it. Layer
+    // a local heuristic on top: drop system lines that look like public
+    // broadcast chat rather than a direct server/command response. Heuristic,
+    // not 100% precise (see settings copy) — applied here only so Android
+    // just stops receiving those messages, same as position-0 today.
+    if (sess.config.chatMode === 'hidden') {
+      if (type === 'chat') return
+      if (type === 'system') {
+        let plain = ''
+        try { plain = String(msg) } catch (e) {}
+        if (/<[A-Za-z0-9_]{2,16}>/.test(plain) ||
+            /joined the game|left the game|has made the advancement|has completed the challenge|has reached the goal/i.test(plain)) return
+      }
+    }
     let senderName = null
     if (typeof sender === 'string') {
       if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(sender)) {
