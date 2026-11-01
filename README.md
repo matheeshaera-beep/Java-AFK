@@ -1,120 +1,59 @@
-# Java AFK v2.4
+<div align="center">
 
-Android app that keeps your Minecraft **Java Edition** account online (AFK) on any
-server — backed by [mineflayer](https://github.com/PrismarineJS/mineflayer)
-running on an embedded Node.js runtime, plus a Go
-[gophertunnel](https://github.com/Sandertv/gophertunnel)-based Bedrock engine
-for headless/CLI use.
+# Java AFK  
+**Android Minecraft Java AFK Bot**
 
-## Features
+[![Platform](https://img.shields.io/badge/Platform-Android-green.svg)]()
+[![Engine](https://img.shields.io/badge/Engine-Mineflayer-orange.svg)]()
+[![Runtime](https://img.shields.io/badge/Runtime-Embedded%20Node.js-blue.svg)]()
 
-- **Server list** — add, edit and delete servers (name, host, port).
-- **Online + offline mode** — Microsoft device-code sign-in with saved token,
-  or offline usernames.
-- **Up to 5 bots at once**, each with its own session screen.
-- **Live connection stages** — bridge boot → connecting → authenticating →
-  logging in → connected, with an "Online as X · auth · host:port" summary.
-- **Live logs + chat** — bridge log stream, per-server chat send/receive
-  (keyboard Send key and arrow share one send path; own messages echo as
-  `<You>`; bot errors stay in the Log tab, never as `<null>` chat lines).
-- **AFK timer + data usage** — per-server counters that reset on Stop.
-- **Health + hunger every 30 s** — logged on spawn and then every 30 seconds
-  while connected (damage/heal shows promptly, rate-limited against spam).
-- **Quiet window log** — server lobby menus that open/close with nothing
-  visible collapse into single lines (`Window closed ×17`) instead of floods;
-  real menus log their title, type, slots and items.
-- **Foreground service** — persistent notification shows the running server(s)
-  with a force-stop action; per-server wake lock.
-- **Resource monitor** — CPU / RAM drawer panel, dark mode.
+</div>
 
-## How to use
+## Overview
 
-1. Install the APK from the
-   [v2.4 release](https://github.com/matheeshaera-beep/Java-AFK/releases/tag/v2.4).
-2. Open the app, tap **+**, enter a server (e.g. Name `Donut SMP`,
-   Host `donutsmp.net`, Port `25565`).
-3. Open the server, tap **Start**.
-4. If it uses online mode, tap **Open browser** in the sign-in dialog, log in
-   with your Microsoft account and enter the shown code, then tap **Done**.
-5. The state turns **Connected** (`Online as <you>`) and the bot idles on the
-   server. Optional: set a chat command + delay in the ⚙ settings — it runs
-   after every spawn.
-6. **Stop** disconnects (timer + data reset). The ✕ action on the notification
-   force-stops the service and all sessions.
+Java AFK is an Android app that keeps your Minecraft **Java Edition** account online using an embedded Node.js runtime and Mineflayer. It is the full-featured version, built for richer AFK sessions, live logs, chat, and better visibility into what the bot is doing.
 
-Tips:
+## Core Capabilities
 
-- The log tab shows everything the bridge reports (connect, auth, kicks,
-  errors, reconnects). It follows the newest lines; scroll up to pause and
-  tap **Jump to latest** to resume.
-- Reconnect behavior: any drop (kick, network error, timeout) retries with
-  exponential backoff (5 s → 5 min cap, ≥30 s after throttling). The counter
-  resets after 60 s of stable uptime. Bans / whitelist rejections stop
-  auto-retry (start manually if that changes). The session screen shows
-  **Reconnecting** with the next attempt and the last error.
-- View distance defaults to **2** — enough for AFK and far cheaper on
-  battery, RAM and mobile data. (Farm output depends on the server's
-  simulation-distance, not this setting.) Raise it in ⚙ settings only if
-  you need more chunks.
-- If Microsoft asks again later, use **Clear token** in the server settings
-  and Start again.
-- Up to 5 servers can run at the same time (each bot costs CPU, RAM and
-  data — watch the drawer usage panel); a sixth Start is refused with a message.
-- Stopping the last server releases the wake lock and stops the service, so
-  the phone sleeps normally with zero bots.
-- Chat tab: the input stays above the keyboard (edge-to-edge + IME insets),
-  grows to 5 lines, and both the keyboard Send key and the arrow send.
-  `commandsOnly`/`Hidden` only limit *incoming* chat — your Send always works.
+- **Mineflayer-based bot engine**
+- **Embedded Node.js runtime**
+- **Multi-bot sessions**, limited to 5 bots for RAM safety
+- **Live logs, chat, and connection states**
+- **In-game menu/window visibility**
 
-### Screenshots
+## Comparison
+
+| | Java AFK | Java AFK NaNo |
+| :--- | :--- | :--- |
+| **Engine** | Embedded Node.js + Mineflayer | Pure Kotlin |
+| **Bot Limit** | 5 bots | No fixed limit |
+| **RAM Usage** | Higher | Lower |
+| **Data Usage** | Higher | Lower |
+| **Best For** | Full-featured AFK sessions | Lightweight long-running AFK |
+
+## Feature Availability
+
+| Feature | Java AFK | Java AFK NaNo |
+| :--- | :---: | :---: |
+| **In-game menu / window handling** | ✅ | ❌ |
+| **Low data usage** | ❌ | ✅ |
+| **Low RAM usage** | ❌ | ✅ |
+| **No fixed bot limit** | ❌ | ✅ |
+
+> Java AFK limits bots to 5 because Mineflayer uses significantly more RAM and data.  
+> Java AFK NaNo is lightweight enough to run without a fixed bot limit.
+
+## Preview
 
 <p align="center">
-  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/session-log.png" width="23%" alt="Session log" />
-  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/chat-tab.png" width="23%" alt="Chat tab" />
-  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/server-settings.png" width="23%" alt="Server settings" />
-  <img src="https://github.com/matheeshaera-beep/Java-AFK/releases/download/v2.4/server-list-add.png" width="23%" alt="Server list and Add server" />
-</p
-  >
+  <img src="./Screenshots/server-list-add.png" alt="Server Management" width="48%" />
+  <img src="./Screenshots/session-log.png" alt="Live Session Logs" width="48%" />
+</p>
 
-## Supported devices
+## Quick Start
 
-- **OS:** Android 15 or newer (`minSdk 35`), 64-bit only.
-- **CPU:** `arm64-v8a` physical phones; `x86_64` Android emulators. No 32-bit
-  (`armeabi-v7a`, `x86`) builds — those ABIs are not shipped.
-- **Storage:** keep ~500 MB free (the APK plus a one-time ~120 MB data copy
-  on first Start).
-- **OS page size:** 4 KB (standard). The bundled `libnode.so` is not 16 KB
-  aligned, so 16 KB-page mode is unverified and may fail to load it.
-- **Tested on:** Pixel 8.
-
-## Build from source
-
-Requirements: JDK 17, Android SDK (compileSdk 37, NDK 29), Go 1.27+ for the
-engine/CLI.
-
-```sh
-cd android
-./gradlew :app:assembleDebug        # APK -> app/build/outputs/apk/debug/
-go build ./...                      # Go engine + CLI (repo root)
-```
-
-Notes for developers:
-
-- `android/` embeds Node.js v18 (`jniLibs/arm64-v8a`) through a small JNI
-  bridge (`native-lib.cpp` — `node::Start` runs exactly once per process).
-- The mineflayer bot project lives in
-  `android/app/src/main/assets/nodejs-project/` (vendored `node_modules`,
-  including the full `minecraft-data` Java protocol payload the bot needs).
-  On first Start the app copies it to internal storage (stamp-guarded).
-- The local HTTP bridge defaults to `http://127.0.0.1:3001`
-  (`NodeRuntime.baseUrl`, `BRIDGE_PORT` in `main.js`).
-- `engine/` is the standalone Bedrock client (RakNet handshake, Xbox auth,
-  spawn, keep-alive, reconnect policy); `cmd/afkcli` is its CLI.
-
-## Donate 
-
-☕ **[buymeacoffee.com/matheeshaex](https://buymeacoffee.com/matheeshaex)**
-
-## License
-
-Personal project — all rights reserved unless stated otherwise.
+1. Install the latest APK from the [Releases](../../releases) page.
+2. Add your server.
+3. Tap **Start**.
+4. Sign in if the server requires Microsoft authentication.
+5. The bot connects and stays online.
